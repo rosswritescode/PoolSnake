@@ -1,842 +1,917 @@
 (function () {
   'use strict';
 
-  // ============================================================
-  // Config
-  // ============================================================
-  const GRID_SIZES = { small: 15, medium: 20, large: 30 };
-  const SPEEDS     = { slow: 200, normal: 120, fast: 65 };
-  const SNAKE_COLOR = '#00ff41';
-
-  // Snooker colour ball definitions (name, snooker value, display colour)
-  const COLOUR_DEFS = [
-    { name: 'yellow', value: 2, color: '#f0d000' },
-    { name: 'green',  value: 3, color: '#00aa44' },
-    { name: 'brown',  value: 4, color: '#8b4010' },
-    { name: 'blue',   value: 5, color: '#0077cc' },
-    { name: 'pink',   value: 6, color: '#ff5fa0' },
-    { name: 'black',  value: 7, color: '#888888' },
+  // ─── Pool ball colours (1–15) ────────────────────────────────────────────────
+  const BALL_COLORS = [
+    '#f5de00', // 1  yellow
+    '#0057a8', // 2  blue
+    '#cc2200', // 3  red
+    '#7b2d8b', // 4  purple
+    '#e87000', // 5  orange
+    '#007a3d', // 6  green
+    '#8b2020', // 7  maroon
+    '#111111', // 8  black
+    '#f5de00', // 9  yellow  (stripe)
+    '#0057a8', // 10 blue    (stripe)
+    '#cc2200', // 11 red     (stripe)
+    '#7b2d8b', // 12 purple  (stripe)
+    '#e87000', // 13 orange  (stripe)
+    '#007a3d', // 14 green   (stripe)
+    '#8b2020', // 15 maroon  (stripe)
   ];
 
-  // Canonical snooker spot positions — yellow/green/brown on baulk line,
-  // blue centre, pink pyramid spot, black top spot.
-  function getBaseColourPositions() {
-    return [
-      { ...COLOUR_DEFS[0], origIdx: 0, x: Math.floor(cols * 0.25), y: Math.floor(cols * 0.75) }, // yellow
-      { ...COLOUR_DEFS[1], origIdx: 1, x: Math.floor(cols * 0.75), y: Math.floor(cols * 0.75) }, // green
-      { ...COLOUR_DEFS[2], origIdx: 2, x: Math.floor(cols * 0.50), y: Math.floor(cols * 0.75) }, // brown
-      { ...COLOUR_DEFS[3], origIdx: 3, x: Math.floor(cols * 0.50), y: Math.floor(cols * 0.50) }, // blue
-      { ...COLOUR_DEFS[4], origIdx: 4, x: Math.floor(cols * 0.50), y: Math.floor(cols * 0.27) }, // pink
-      { ...COLOUR_DEFS[5], origIdx: 5, x: Math.floor(cols * 0.50), y: Math.floor(cols * 0.10) }, // black
-    ];
-  }
+  // ─── Physics ─────────────────────────────────────────────────────────────────
+  const FRICTION_K   = 1.4;   // exponential speed decay coefficient (1/s)
+  const WALL_REST    = 0.62;  // wall restitution coefficient
+  const BALL_REST    = 0.90;  // ball–ball restitution coefficient
+  const HIT_STRENGTH = 580;   // px/s impulse on snake contact
+  const HIT_COOLDOWN = 380;   // ms before snake can re-hit same ball
+  const PHYS_ITERS   = 5;     // collision resolution passes per frame
 
-  // Apply accumulated drift offsets — used during red/colour phase.
-  function getShiftedColourPositions() {
-    return getBaseColourPositions().map(function (ball) {
-      return Object.assign({}, ball, {
-        x: Math.max(1, Math.min(cols - 2, ball.x + colourOffsets[ball.origIdx].dx)),
-        y: Math.max(1, Math.min(cols - 2, ball.y + colourOffsets[ball.origIdx].dy)),
-      });
-    });
-  }
+  const SPEEDS = { slow: 220, normal: 130, fast: 68 };
 
-  // After a colour is potted: nudge 2 random balls 2–3 cells, avoiding overlaps.
-  function shiftRandomColours() {
-    var dirs  = [{ dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }];
-    var bases = getBaseColourPositions();
-    var positions = getShiftedColourPositions(); // live positions for collision checks
-    var order = [0, 1, 2, 3, 4, 5];
-    for (var i = order.length - 1; i > 0; i--) {
-      var j = Math.floor(Math.random() * (i + 1));
-      var t = order[i]; order[i] = order[j]; order[j] = t;
-    }
-    for (var k = 0; k < 2; k++) {
-      var bi = order[k];
-      // Try each direction (randomised) until a non-colliding position is found
-      var shuffled = dirs.slice().sort(function () { return Math.random() - 0.5; });
-      for (var d = 0; d < shuffled.length; d++) {
-        var dist = 2 + Math.floor(Math.random() * 2);
-        var newOx = colourOffsets[bi].dx + shuffled[d].dx * dist;
-        var newOy = colourOffsets[bi].dy + shuffled[d].dy * dist;
-        var nx = Math.max(1, Math.min(cols - 2, bases[bi].x + newOx));
-        var ny = Math.max(1, Math.min(cols - 2, bases[bi].y + newOy));
-        var ok = true;
-        for (var m = 0; m < positions.length; m++) {
-          if (m !== bi && positions[m].x === nx && positions[m].y === ny) { ok = false; break; }
-        }
-        if (ok) {
-          colourOffsets[bi].dx = newOx;
-          colourOffsets[bi].dy = newOy;
-          positions[bi] = { x: nx, y: ny }; // update so next ball checks against this
-          break;
-        }
-      }
-    }
-  }
+  // ─── Mutable settings (live-editable during play) ────────────────────────────
+  const settings = {
+    speed:       'normal',
+    ballCount:   10,
+    timeLimits:  [20, 50, 70],
+    multipliers: [6, 4, 2],
+  };
 
-  // ============================================================
-  // State
-  // ============================================================
-  let gameState = 'start'; // 'start' | 'playing' | 'gameover' | 'win' | 'timeup'
-  let gameEndTime = 0;
-  let timerStartTime = 0;
-  let foulUntil = 0; // Date.now() + 500 during post-foul freeze
-  let snake, currentDir, nextDir;
-  let phase = 'red';        // 'red' | 'colour' | 'endgame'
-  let redBall = null;       // { x, y } — the single red on the table
-  let colourBalls = [];     // array of colour ball objects when phase === 'colour' | 'endgame'
-  let colourOffsets = [];   // [{dx,dy}] per COLOUR_DEFS index — drift from original spot
-  let redCount = 0;         // reds potted; at 8 triggers endgame
-  let currentBreak = 0;
-  let highBreak = parseInt(localStorage.getItem('serpentine_hi_break') || '0', 10);
-  let potMessage = null;    // { text, color, startTs }
-  let animId, lastMoveTime, dpr, cols, cellSize;
-  let settings = { size: 'medium', speed: 'normal', reds: 8, timer: 0, walls: 'solid' };
+  // ─── Game state ───────────────────────────────────────────────────────────────
+  let gameState = 'start'; // 'start' | 'playing' | 'win' | 'gameover'
+  let snake, dir, nextDir;
+  let balls, pottedBalls;
+  let score, bestScore;
+  let gameStartTime, elapsed;
+  let lastStepTime;
+  let msgText, msgExpiry;
+  let finalMultiplier, finalScore;
+  let lastFrameTime = 0;
 
-  function canRestart() { return Date.now() - gameEndTime >= 3000; }
+  // ─── Canvas / layout globals ──────────────────────────────────────────────────
+  let canvas, ctx, W, H;
+  let CUSHION, TABLE_X, TABLE_Y, TABLE_W, TABLE_H;
+  let POTTED_H;
+  let POCKET_R, POCKETS;
+  let INNER_LEFT, INNER_TOP, INNER_W, INNER_H;
+  let CELL_W, GRID_COLS, GRID_ROWS;
+  let BALL_R;
 
-  // ============================================================
-  // DOM refs
-  // ============================================================
-  const canvas     = document.getElementById('game-canvas');
-  const ctx        = canvas.getContext('2d');
-  const scoreEl    = document.getElementById('score-val');
-  const hiEl       = document.getElementById('hi-val');
-  const onEl       = document.getElementById('on-val');
-  const navScoreEl = document.getElementById('nav-score-val');
-  const actionBtn  = document.getElementById('action-btn');
-  const restartBtn = document.getElementById('restart-btn');
-
-  // ============================================================
-  // Canvas sizing
-  // ============================================================
-  function resizeCanvas() {
-    const wrap = document.querySelector('.canvas-wrap');
-    dpr        = window.devicePixelRatio || 1;
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Layout
+  // ─────────────────────────────────────────────────────────────────────────────
+  function calcLayout() {
+    const wrap = canvas.parentElement;
     const size = wrap.clientWidth;
+    const dpr  = window.devicePixelRatio || 1;
     canvas.width  = size * dpr;
     canvas.height = size * dpr;
     canvas.style.width  = size + 'px';
     canvas.style.height = size + 'px';
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.scale(dpr, dpr);
-    cols     = GRID_SIZES[settings.size];
-    cellSize = size / cols;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    W = size;
+    H = size;
+
+    CUSHION  = Math.max(20, Math.round(W * 0.052));
+    POTTED_H = Math.round(H * 0.11);
+
+    TABLE_X = CUSHION;
+    TABLE_Y = CUSHION;
+    TABLE_W = W - 2 * CUSHION;
+    TABLE_H = H - 2 * CUSHION - POTTED_H;
+
+    POCKET_R = Math.max(10, CUSHION * 0.82);
+
+    POCKETS = [
+      { x: TABLE_X,               y: TABLE_Y            }, // TL
+      { x: TABLE_X + TABLE_W / 2, y: TABLE_Y            }, // TM
+      { x: TABLE_X + TABLE_W,     y: TABLE_Y            }, // TR
+      { x: TABLE_X,               y: TABLE_Y + TABLE_H  }, // BL
+      { x: TABLE_X + TABLE_W / 2, y: TABLE_Y + TABLE_H  }, // BM
+      { x: TABLE_X + TABLE_W,     y: TABLE_Y + TABLE_H  }, // BR
+    ];
+
+    // Snake grid sits inside the table, clear of corner pockets
+    const pad  = POCKET_R * 0.55;
+    INNER_LEFT = TABLE_X + pad;
+    INNER_TOP  = TABLE_Y + pad;
+    INNER_W    = TABLE_W - 2 * pad;
+    INNER_H    = TABLE_H - 2 * pad;
+
+    GRID_COLS = 18;
+    CELL_W    = INNER_W / GRID_COLS;
+    GRID_ROWS = Math.max(1, Math.floor(INNER_H / CELL_W));
+    BALL_R    = CELL_W * 0.74; // diameter > one cell → always hittable
   }
 
-  // ============================================================
-  // Game init
-  // ============================================================
-  function initGame() {
-    resizeCanvas();
-    const mid  = Math.floor(cols / 2);
-    const midY = Math.floor(cols / 2);
-    const len  = Math.min(4, Math.floor(cols / 4));
-    snake = [];
-    for (let i = 0; i < len; i++) snake.push({ x: mid - i, y: midY });
-    currentDir   = { dx: 1, dy: 0 };
-    nextDir      = null;
-    phase         = 'red';
-    redCount      = 0;
-    currentBreak  = 0;
-    colourBalls   = [];
-    colourOffsets = COLOUR_DEFS.map(function () { return { dx: 0, dy: 0 }; });
-    potMessage      = null;
-    lastMoveTime    = 0;
-    timerStartTime  = Date.now();
-    foulUntil       = 0;
-    placeRed();
-    updateHUD();
+  function cellToPixel(gx, gy) {
+    return {
+      x: INNER_LEFT + (gx + 0.5) * CELL_W,
+      y: INNER_TOP  + (gy + 0.5) * CELL_W,
+    };
   }
 
-  // ============================================================
-  // Ball placement
-  // ============================================================
-  function placeRed() {
-    // Avoid snake cells and current (shifted) colour spots
-    const snakeKeys = new Set(snake.map(function (s) { return s.x + ',' + s.y; }));
-    const spotKeys  = new Set(getShiftedColourPositions().map(function (s) { return s.x + ',' + s.y; }));
-    let pos;
-    do {
-      pos = { x: Math.floor(Math.random() * cols), y: Math.floor(Math.random() * cols) };
-    } while (snakeKeys.has(pos.x + ',' + pos.y) || spotKeys.has(pos.x + ',' + pos.y));
-    redBall = pos;
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Triangle rack builder
+  // ─────────────────────────────────────────────────────────────────────────────
+  function createTriangle(count) {
+    const rowMap  = { 6: 3, 10: 4, 15: 5 };
+    const numRows = rowMap[count] || 4;
+
+    // Spacing slightly > 2r so balls start separated (prevents initial overlap)
+    const spacing = BALL_R * 2.08;
+    const dx      = spacing * Math.sqrt(3) / 2; // horizontal step per row
+
+    // Apex (leftmost ball of triangle) ~60 % across the table, vertically centred
+    const triW  = (numRows - 1) * dx;
+    const apexX = TABLE_X + TABLE_W * 0.62 - triW / 2;
+    const apexY = TABLE_Y + TABLE_H * 0.5;
+
+    const list = [];
+    let n = 0;
+    for (let r = 0; r < numRows && n < count; r++) {
+      const rowX    = apexX + r * dx;
+      const numBall = r + 1;
+      const startY  = apexY - (numBall - 1) * spacing / 2;
+      for (let i = 0; i < numBall && n < count; i++) {
+        list.push({
+          x:           rowX,
+          y:           startY + i * spacing,
+          vx:          0,
+          vy:          0,
+          radius:      BALL_R,
+          number:      n + 1,
+          stripe:      n >= 8,
+          color:       BALL_COLORS[n],
+          potted:      false,
+          hitCooldown: 0,
+        });
+        n++;
+      }
+    }
+    return list;
   }
 
-  function placeColours() {
-    colourBalls = getShiftedColourPositions();
-    redBall = null;
-  }
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Physics step (every animation frame)
+  // ─────────────────────────────────────────────────────────────────────────────
+  function physicsStep(dt) {
+    const dtS   = dt / 1000;
+    const decay = Math.exp(-FRICTION_K * dtS);
+    const minX  = TABLE_X + BALL_R;
+    const maxX  = TABLE_X + TABLE_W - BALL_R;
+    const minY  = TABLE_Y + BALL_R;
+    const maxY  = TABLE_Y + TABLE_H - BALL_R;
 
-  function startEndgame() {
-    // Endgame uses the current shifted positions, not canonical spots
-    phase = 'endgame';
-    colourBalls = getShiftedColourPositions();
-    redBall = null;
-    updateHUD();
-    showPotMessage('POT IN ORDER!', '#f0d000');
-  }
+    for (const b of balls) {
+      if (b.potted) continue;
 
-  // ============================================================
-  // Direction queue — prevents 180° reversal
-  // ============================================================
-  function queueDir(dir) {
-    const ref = nextDir || currentDir;
-    if (dir.dx === -ref.dx && dir.dy === -ref.dy) return;
-    nextDir = dir;
-  }
+      b.x += b.vx * dtS;
+      b.y += b.vy * dtS;
+      b.vx *= decay;
+      b.vy *= decay;
 
-  // ============================================================
-  // Movement step
-  // ============================================================
-  function step() {
-    if (nextDir) { currentDir = nextDir; nextDir = null; }
+      if (Math.sqrt(b.vx * b.vx + b.vy * b.vy) < 1.5) { b.vx = 0; b.vy = 0; }
 
-    let nx = snake[0].x + currentDir.dx;
-    let ny = snake[0].y + currentDir.dy;
+      // Cushion bounces
+      if (b.x < minX) { b.x = minX; b.vx =  Math.abs(b.vx) * WALL_REST; }
+      if (b.x > maxX) { b.x = maxX; b.vx = -Math.abs(b.vx) * WALL_REST; }
+      if (b.y < minY) { b.y = minY; b.vy =  Math.abs(b.vy) * WALL_REST; }
+      if (b.y > maxY) { b.y = maxY; b.vy = -Math.abs(b.vy) * WALL_REST; }
 
-    // Wall collision — solid ends game; wrap teleports to opposite side
-    if (nx < 0 || nx >= cols || ny < 0 || ny >= cols) {
-      if (settings.walls === 'solid') { endGame(); return; }
-      nx = (nx + cols) % cols;
-      ny = (ny + cols) % cols;
+      // Pocket detection (slightly generous entry zone for playability)
+      for (const p of POCKETS) {
+        const pdx = b.x - p.x;
+        const pdy = b.y - p.y;
+        if (Math.sqrt(pdx * pdx + pdy * pdy) < POCKET_R + BALL_R * 0.25) {
+          potBall(b);
+          break;
+        }
+      }
+
+      if (b.hitCooldown > 0) b.hitCooldown = Math.max(0, b.hitCooldown - dt);
     }
 
-    // Self collision — skip last segment (it's about to vacate)
+    // Ball–ball elastic collisions (multiple iterations for stability in clusters)
+    const active = balls.filter(b => !b.potted);
+    for (let iter = 0; iter < PHYS_ITERS; iter++) {
+      for (let i = 0; i < active.length; i++) {
+        for (let j = i + 1; j < active.length; j++) {
+          resolvePair(active[i], active[j]);
+        }
+      }
+    }
+  }
+
+  function resolvePair(a, b) {
+    const dx   = b.x - a.x;
+    const dy   = b.y - a.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const min  = a.radius + b.radius;
+    if (dist >= min || dist < 0.001) return;
+
+    const nx  = dx / dist;
+    const ny  = dy / dist;
+    const sep = (min - dist) / 2;
+    a.x -= nx * sep;  a.y -= ny * sep;
+    b.x += nx * sep;  b.y += ny * sep;
+
+    const dvx = a.vx - b.vx;
+    const dvy = a.vy - b.vy;
+    const dot = dvx * nx + dvy * ny;
+    if (dot <= 0) return;
+
+    const imp = dot * BALL_REST;
+    a.vx -= imp * nx;  a.vy -= imp * ny;
+    b.vx += imp * nx;  b.vy += imp * ny;
+  }
+
+  function potBall(ball) {
+    ball.potted = true;
+    ball.vx = 0;
+    ball.vy = 0;
+    pottedBalls.push({ ...ball });
+    score += 1;
+    updateScoreUI();
+    showMsg('POT! +1');
+    if (pottedBalls.length === balls.length) endGame(true);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Snake
+  // ─────────────────────────────────────────────────────────────────────────────
+  function initGame() {
+    const midRow = Math.floor(GRID_ROWS / 2);
+    snake = [
+      { x: 2, y: midRow },
+      { x: 1, y: midRow },
+      { x: 0, y: midRow },
+    ];
+    dir     = { dx: 1, dy: 0 };
+    nextDir = null;
+
+    balls           = createTriangle(settings.ballCount);
+    pottedBalls     = [];
+    score           = 0;
+    elapsed         = 0;
+    gameStartTime   = performance.now();
+    lastStepTime    = performance.now();
+    msgText         = '';
+    msgExpiry       = 0;
+    finalMultiplier = 0;
+    finalScore      = 0;
+    gameState       = 'playing';
+    updateScoreUI();
+  }
+
+  function snakeStep() {
+    if (nextDir) { dir = nextDir; nextDir = null; }
+
+    const head = snake[0];
+    const nx   = head.x + dir.dx;
+    const ny   = head.y + dir.dy;
+
+    if (nx < 0 || nx >= GRID_COLS || ny < 0 || ny >= GRID_ROWS) {
+      endGame(false);
+      return;
+    }
     for (let i = 0; i < snake.length - 1; i++) {
-      if (snake[i].x === nx && snake[i].y === ny) { endGame(); return; }
+      if (snake[i].x === nx && snake[i].y === ny) {
+        endGame(false);
+        return;
+      }
     }
 
     snake.unshift({ x: nx, y: ny });
+    snake.pop();
 
-    let ate = false;
-
-    if (phase === 'red' && redBall && nx === redBall.x && ny === redBall.y) {
-      // Potted the red
-      redCount++;
-      currentBreak += 1;
-      updateHighBreak();
-      updateHUD();
-      showPotMessage('RED  +1', '#cc2200');
-      phase = 'colour';
-      placeColours();
-      ate = true;
-
-    } else if (phase === 'colour') {
-      const idx = colourBalls.findIndex(function (b) { return b.x === nx && b.y === ny; });
-      if (idx !== -1) {
-        const ball = colourBalls[idx];
-        colourOffsets[ball.origIdx] = { dx: 0, dy: 0 }; // reset to original spot
-        currentBreak += ball.value;
-        updateHighBreak();
-        updateHUD();
-        showPotMessage(ball.name.toUpperCase() + '  +' + ball.value, ball.color);
-        if (redCount >= settings.reds) {
-          startEndgame();
-        } else {
-          shiftRandomColours();
-          phase = 'red';
-          colourBalls = [];
-          placeRed();
-        }
-        ate = true;
-      }
-    } else if (phase === 'endgame') {
-      const idx = colourBalls.findIndex(function (b) { return b.x === nx && b.y === ny; });
-      if (idx !== -1) {
-        const ball = colourBalls[idx];
-        if (idx === 0) {
-          // Correct order — pot it
-          currentBreak += ball.value;
-          updateHighBreak();
-          updateHUD();
-          showPotMessage(ball.name.toUpperCase() + '  +' + ball.value, ball.color);
-          colourBalls.shift();
-          if (colourBalls.length === 0) { winGame(); return; }
-          ate = true;
-        } else {
-          // Wrong order — penalty, not game over
-          var penalty = Math.max(4, ball.value);
-          currentBreak = Math.max(0, currentBreak - penalty);
-          foulUntil = Date.now() + 500;
-          showPotMessage('FOUL!  -' + penalty, '#ff4136');
-          updateHUD();
-          // ate stays false — snake doesn't grow, ball stays on table
-        }
-      }
-    }
-
-    if (!ate) snake.pop();
-  }
-
-  function updateHighBreak() {
-    if (currentBreak > highBreak) {
-      highBreak = currentBreak;
-      localStorage.setItem('serpentine_hi_break', String(highBreak));
-    }
-  }
-
-  // ============================================================
-  // HUD
-  // ============================================================
-  function updateHUD() {
-    scoreEl.textContent    = currentBreak;
-    hiEl.textContent       = highBreak;
-    navScoreEl.textContent = currentBreak;
-
-    if (onEl) {
-      if (phase === 'red') {
-        onEl.textContent  = 'RED';
-        onEl.style.color  = '#cc2200';
-        onEl.style.textShadow = '0 0 8px rgba(204,34,0,0.7)';
-      } else if (phase === 'endgame' && colourBalls.length > 0) {
-        const tgt = colourBalls[0];
-        onEl.textContent  = tgt.name.toUpperCase();
-        onEl.style.color  = tgt.color;
-        onEl.style.textShadow = '0 0 8px ' + tgt.color + '99';
-      } else {
-        onEl.textContent  = 'COLOUR';
-        onEl.style.color  = '#f0d000';
-        onEl.style.textShadow = '0 0 8px rgba(240,208,0,0.7)';
+    // Hit any ball that overlaps the new head cell
+    const { x: hx, y: hy } = cellToPixel(nx, ny);
+    for (const b of balls) {
+      if (b.potted || b.hitCooldown > 0) continue;
+      const ddx = hx - b.x;
+      const ddy = hy - b.y;
+      if (Math.sqrt(ddx * ddx + ddy * ddy) < b.radius + CELL_W * 0.5) {
+        b.vx += dir.dx * HIT_STRENGTH;
+        b.vy += dir.dy * HIT_STRENGTH;
+        b.hitCooldown = HIT_COOLDOWN;
       }
     }
   }
 
-  // ============================================================
-  // Pot message (brief canvas overlay text after potting)
-  // ============================================================
-  function showPotMessage(text, color) {
-    potMessage = { text: text, color: color, startTs: null };
+  function queueDir(dx, dy) {
+    if (dx === -dir.dx && dy === -dir.dy) return; // prevent 180° reversal
+    nextDir = { dx, dy };
   }
 
-  // ============================================================
-  // Game state transitions
-  // ============================================================
-  function startGame() {
-    if (animId) { cancelAnimationFrame(animId); animId = null; }
-    initGame();
-    gameState = 'playing';
-    syncUI();
-    animId = requestAnimationFrame(gameLoop);
-  }
-
-  function endGame() {
-    gameState = 'gameover';
-    gameEndTime = Date.now();
-    if (animId) { cancelAnimationFrame(animId); animId = null; }
-    syncUI();
-    draw(0);
-    actionBtn.disabled = true;
-    setTimeout(function () { actionBtn.disabled = false; }, 3000);
-  }
-
-  function winGame() {
-    gameState = 'win';
-    gameEndTime = Date.now();
-    if (animId) { cancelAnimationFrame(animId); animId = null; }
-    syncUI();
-    draw(0);
-    actionBtn.disabled = true;
-    setTimeout(function () { actionBtn.disabled = false; }, 3000);
-  }
-
-  function timeUp() {
-    gameState = 'timeup';
-    gameEndTime = Date.now();
-    if (animId) { cancelAnimationFrame(animId); animId = null; }
-    updateHighBreak();
-    syncUI();
-    draw(0);
-    actionBtn.disabled = true;
-    setTimeout(function () { actionBtn.disabled = false; }, 3000);
-  }
-
-  function syncUI() {
-    var labels = { start: 'START GAME', playing: 'PLAYING...', gameover: 'PLAY AGAIN', win: 'PLAY AGAIN', timeup: 'PLAY AGAIN' };
-    actionBtn.textContent = labels[gameState] || 'START GAME';
-    actionBtn.hidden = (gameState === 'playing');
-    restartBtn.hidden = (gameState !== 'playing');
-  }
-
-  // ============================================================
-  // Game loop
-  // ============================================================
-  function gameLoop(ts) {
-    animId = requestAnimationFrame(gameLoop);
-    if (settings.timer > 0 && Date.now() - timerStartTime >= settings.timer * 1000) {
-      timeUp(); return;
-    }
-    if (ts - lastMoveTime >= SPEEDS[settings.speed]) {
-      lastMoveTime = ts;
-      if (Date.now() >= foulUntil) {
-        step();
-        if (gameState !== 'playing') return;
+  function endGame(won) {
+    elapsed = (performance.now() - gameStartTime) / 1000;
+    if (won) {
+      const [t1, t2, t3] = settings.timeLimits;
+      const [m1, m2, m3] = settings.multipliers;
+      if      (elapsed <= t1) finalMultiplier = m1;
+      else if (elapsed <= t2) finalMultiplier = m2;
+      else if (elapsed <= t3) finalMultiplier = m3;
+      else                    finalMultiplier = 1;
+      finalScore = Math.round(score * finalMultiplier);
+      if (finalScore > bestScore) {
+        bestScore = finalScore;
+        localStorage.setItem('poolsnake_best', String(bestScore));
       }
+      gameState = 'win';
+    } else {
+      gameState = 'gameover';
     }
-    draw(ts);
+    updateScoreUI();
   }
 
-  // ============================================================
+  // ─────────────────────────────────────────────────────────────────────────────
   // Rendering
-  // ============================================================
-  function canvasSize() { return canvas.width / dpr; }
-  function pixelFont(px) { return px + 'px "Press Start 2P", monospace'; }
-
+  // ─────────────────────────────────────────────────────────────────────────────
   function draw(ts) {
-    var size = canvasSize();
-    ctx.fillStyle = '#0a0a0a';
-    ctx.fillRect(0, 0, size, size);
-    drawGrid(size);
-
-    if (gameState === 'start') { drawStartScreen(size); return; }
-
-    // Balls
-    if (phase === 'red' && redBall)               drawRedBall(ts);
-    if (phase === 'colour' || phase === 'endgame') drawColourBalls(ts);
-
-    drawSnake();
-    drawOnIndicator(size);
-    drawTimer(size, ts);
-    if (potMessage) drawPotMessage(size, ts);
-
-    if (gameState === 'gameover') drawGameOver(size);
-    if (gameState === 'win')      drawWinScreen(size);
-    if (gameState === 'timeup')   drawTimeUpScreen(size);
+    ctx.clearRect(0, 0, W, H);
+    drawTable();
+    if (gameState !== 'start') {
+      drawGrid();
+      drawSnake();
+      drawBalls();
+    }
+    drawPottedStrip();
+    drawHUD(ts);
+    if (gameState !== 'playing') drawOverlay(ts);
   }
 
-  function drawGrid(size) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.03)';
-    ctx.lineWidth   = 0.5;
-    for (var i = 0; i <= cols; i++) {
-      ctx.beginPath(); ctx.moveTo(i * cellSize, 0);    ctx.lineTo(i * cellSize, size); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, i * cellSize);    ctx.lineTo(size, i * cellSize); ctx.stroke();
+  // ── Table & pockets ────────────────────────────────────────────────────────
+  function drawTable() {
+    // Dark surround
+    ctx.fillStyle = '#080808';
+    ctx.fillRect(0, 0, W, H);
+
+    // Cushion body (rounded rect)
+    ctx.fillStyle = '#155724';
+    rrFill(
+      CUSHION * 0.32, CUSHION * 0.32,
+      W - CUSHION * 0.64, H - CUSHION * 0.64 - POTTED_H,
+      CUSHION * 0.5
+    );
+
+    // Felt playing surface
+    ctx.fillStyle = '#1b5e20';
+    ctx.fillRect(TABLE_X, TABLE_Y, TABLE_W, TABLE_H);
+
+    // Subtle felt texture
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+    ctx.lineWidth = 1;
+    for (let y = TABLE_Y; y < TABLE_Y + TABLE_H; y += 7) {
+      ctx.beginPath();
+      ctx.moveTo(TABLE_X, y);
+      ctx.lineTo(TABLE_X + TABLE_W, y);
+      ctx.stroke();
+    }
+
+    // Cushion inner edge highlight
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(TABLE_X, TABLE_Y, TABLE_W, TABLE_H);
+
+    // Pockets
+    for (const p of POCKETS) {
+      // Black hole
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, POCKET_R, 0, Math.PI * 2);
+      ctx.fillStyle = '#020202';
+      ctx.fill();
+      // Pocket rim
+      ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      // Radial shadow for depth
+      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, POCKET_R);
+      grad.addColorStop(0,   'rgba(0,0,0,0.85)');
+      grad.addColorStop(0.65,'rgba(0,0,0,0.35)');
+      grad.addColorStop(1,   'rgba(0,0,0,0)');
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, POCKET_R, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+
+    // Potted strip background
+    ctx.fillStyle = '#0c0c0c';
+    ctx.fillRect(0, H - POTTED_H, W, POTTED_H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, H - POTTED_H);
+    ctx.lineTo(W, H - POTTED_H);
+    ctx.stroke();
+  }
+
+  // ── Grid ───────────────────────────────────────────────────────────────────
+  function drawGrid() {
+    ctx.strokeStyle = 'rgba(255,255,255,0.035)';
+    ctx.lineWidth = 0.5;
+    for (let c = 0; c <= GRID_COLS; c++) {
+      const x = INNER_LEFT + c * CELL_W;
+      ctx.beginPath();
+      ctx.moveTo(x, INNER_TOP);
+      ctx.lineTo(x, INNER_TOP + GRID_ROWS * CELL_W);
+      ctx.stroke();
+    }
+    for (let r = 0; r <= GRID_ROWS; r++) {
+      const y = INNER_TOP + r * CELL_W;
+      ctx.beginPath();
+      ctx.moveTo(INNER_LEFT, y);
+      ctx.lineTo(INNER_LEFT + GRID_COLS * CELL_W, y);
+      ctx.stroke();
     }
   }
 
+  // ── Snake ──────────────────────────────────────────────────────────────────
   function drawSnake() {
-    var foulFlash = foulUntil > 0 && Date.now() < foulUntil;
-    var flashMod  = foulFlash ? 0.15 + 0.85 * Math.abs(Math.sin(Date.now() / 45)) : 1;
-    var len = snake.length;
-    snake.forEach(function (seg, i) {
-      var alpha = (i === 0 ? 1 : Math.max(0.2, 1 - (i / len) * 0.78)) * flashMod;
-      ctx.fillStyle   = 'rgba(0,255,65,' + alpha + ')';
-      ctx.shadowColor = SNAKE_COLOR;
-      ctx.shadowBlur  = i === 0 ? 14 : 0;
-      var p = Math.max(1, cellSize * 0.07);
-      ctx.fillRect(seg.x * cellSize + p, seg.y * cellSize + p, cellSize - p * 2, cellSize - p * 2);
-    });
-    ctx.shadowBlur = 0;
-  }
-
-  // Draw a single snooker ball at grid position (gx, gy)
-  function drawBall(gx, gy, color, alpha) {
-    var cx = (gx + 0.5) * cellSize;
-    var cy = (gy + 0.5) * cellSize;
-    var r  = Math.max(3, cellSize * 0.38);
-
-    if (alpha !== undefined) ctx.globalAlpha = alpha;
-
-    // Ball body
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle   = color;
-    ctx.shadowColor = color;
-    ctx.shadowBlur  = 10;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-
-    // Specular highlight — top-left offset white circle
-    ctx.beginPath();
-    ctx.arc(cx - r * 0.28, cy - r * 0.30, r * 0.22, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255,255,255,0.45)';
-    ctx.fill();
-
+    const len = snake.length;
+    for (let i = len - 1; i >= 0; i--) {
+      const { x: px, y: py } = cellToPixel(snake[i].x, snake[i].y);
+      const pad   = CELL_W * 0.12;
+      const sz    = CELL_W - pad * 2;
+      const alpha = i === 0 ? 1 : Math.max(0.25, 1 - (i / len) * 0.78);
+      ctx.globalAlpha = alpha;
+      if (i === 0) { ctx.shadowColor = '#00ff41'; ctx.shadowBlur = 14; }
+      ctx.fillStyle = '#00ff41';
+      rrFill(px - sz / 2, py - sz / 2, sz, sz, sz * 0.28);
+      ctx.shadowBlur = 0;
+    }
     ctx.globalAlpha = 1;
   }
 
-  function drawRedBall(ts) {
-    var pulse = 0.65 + 0.35 * Math.sin(ts / 300);
-    drawBall(redBall.x, redBall.y, '#cc2200', pulse);
-  }
-
-  function drawColourBalls(ts) {
-    var breathe = 0.8 + 0.2 * Math.sin(ts / 600);
-    colourBalls.forEach(function (ball, i) {
-      var alpha = (phase === 'endgame' && i === 0)
-        ? 0.55 + 0.45 * Math.abs(Math.sin(ts / 260))  // target: fast strong pulse
-        : breathe;                                      // all others: normal breathe
-      drawBall(ball.x, ball.y, ball.color, alpha);
-    });
-  }
-
-  // Small "ON: RED" / "ON: COLOUR" indicator in top-right of canvas
-  function drawOnIndicator(size) {
-    if (gameState !== 'playing') return;
-    ctx.textAlign = 'right';
-    var s = Math.max(5, Math.floor(size * 0.022));
-    ctx.font = pixelFont(s);
-    var label, color;
-    if (phase === 'red') {
-      label = 'ON: RED'; color = '#cc2200';
-    } else if (phase === 'endgame' && colourBalls.length > 0) {
-      label = 'ON: ' + colourBalls[0].name.toUpperCase(); color = colourBalls[0].color;
-    } else {
-      label = 'ON: COLOUR'; color = '#f0d000';
+  // ── Balls ──────────────────────────────────────────────────────────────────
+  function drawBalls() {
+    for (const b of balls) {
+      if (!b.potted) drawOneBall(b.x, b.y, b.color, b.number, b.stripe, 1);
     }
-    ctx.fillStyle   = color;
-    ctx.shadowColor = color;
-    ctx.shadowBlur  = 6;
-    ctx.fillText(label, size - 6, s + 8);
-    ctx.shadowBlur  = 0;
-    ctx.textAlign   = 'left';
   }
 
-  function drawTimer(size, ts) {
-    if (settings.timer === 0 || gameState !== 'playing') return;
-    var elapsed   = (Date.now() - timerStartTime) / 1000;
-    var remaining = Math.max(0, settings.timer - elapsed);
-    var mins  = Math.floor(remaining / 60);
-    var secs  = Math.floor(remaining % 60);
-    var label = mins + ':' + (secs < 10 ? '0' : '') + secs;
-    var isLow = remaining <= 10;
-
-    var s = Math.max(5, Math.floor(size * 0.022));
-    ctx.font      = pixelFont(s);
-    ctx.textAlign = 'left';
-
-    if (isLow) {
-      ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(ts / 150));
-      ctx.fillStyle   = '#ff4136';
-      ctx.shadowColor = '#ff4136';
-      ctx.shadowBlur  = 8;
-    } else {
-      ctx.fillStyle   = '#444';
-      ctx.shadowBlur  = 0;
-    }
-
-    ctx.fillText(label, 6, s + 8);
-    ctx.shadowBlur  = 0;
-    ctx.globalAlpha = 1;
-  }
-
-  // Pot confirmation message — fades in then out over ~1.4s
-  function drawPotMessage(size, ts) {
-    if (!potMessage) return;
-    if (!potMessage.startTs) potMessage.startTs = ts;
-    var elapsed  = ts - potMessage.startTs;
-    var duration = 1400;
-    if (elapsed > duration) { potMessage = null; return; }
-    var alpha = elapsed < 250 ? elapsed / 250 : 1 - (elapsed - 250) / (duration - 250);
-    alpha = Math.max(0, Math.min(1, alpha));
-
+  function drawOneBall(x, y, color, number, stripe, alpha) {
+    const r = BALL_R;
     ctx.globalAlpha = alpha;
-    ctx.textAlign   = 'center';
-    var s = Math.max(8, Math.floor(size * 0.032));
-    ctx.font        = pixelFont(s);
-    ctx.fillStyle   = potMessage.color;
-    ctx.shadowColor = potMessage.color;
-    ctx.shadowBlur  = 12;
-    ctx.fillText(potMessage.text, size / 2, size * 0.12);
-    ctx.shadowBlur  = 0;
-    ctx.globalAlpha = 1;
-    ctx.textAlign   = 'left';
-  }
-
-  function drawStartScreen(size) {
-    ctx.fillStyle = 'rgba(10,10,10,0.92)';
-    ctx.fillRect(0, 0, size, size);
-    ctx.textAlign = 'center';
-
-    var t = Math.max(12, Math.floor(size * 0.054));
-    ctx.font        = pixelFont(t);
-    ctx.fillStyle   = SNAKE_COLOR;
-    ctx.shadowColor = SNAKE_COLOR;
-    ctx.shadowBlur  = 22;
-    ctx.fillText('SERPENTINE', size / 2, size * 0.38);
-    ctx.shadowBlur = 0;
-
-    var s = Math.max(6, Math.floor(size * 0.022));
-    ctx.font      = pixelFont(s);
-    ctx.fillStyle = '#3a3a3a';
-    ctx.fillText(settings.reds + ' REDS · COLOURS IN ORDER', size / 2, size * 0.38 + t * 2.2);
-
-    var s2 = Math.max(5, Math.floor(size * 0.018));
-    ctx.font      = pixelFont(s2);
-    ctx.fillStyle = '#2a2a2a';
-    ctx.fillText('SELECT OPTIONS + PRESS START', size / 2, size * 0.38 + t * 2.2 + s * 2.4);
-    ctx.textAlign = 'left';
-  }
-
-  function drawOverlay(size, title, sub, color) {
-    ctx.fillStyle = 'rgba(10,10,10,0.86)';
-    ctx.fillRect(0, 0, size, size);
-    ctx.textAlign = 'center';
-
-    var t = Math.max(12, Math.floor(size * 0.048));
-    ctx.font        = pixelFont(t);
-    ctx.fillStyle   = color;
     ctx.shadowColor = color;
-    ctx.shadowBlur  = 18;
-    ctx.fillText(title, size / 2, size / 2 - t * 0.4);
-    ctx.shadowBlur = 0;
+    ctx.shadowBlur  = 9;
 
-    var s = Math.max(6, Math.floor(size * 0.022));
-    ctx.font      = pixelFont(s);
-    ctx.fillStyle = '#444';
-    ctx.fillText(sub, size / 2, size / 2 + s * 3.2);
-    ctx.textAlign = 'left';
-  }
+    // Body
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = stripe ? '#f0f0f0' : color;
+    ctx.fill();
 
-  function drawGameOver(size) {
-    ctx.fillStyle = 'rgba(10,10,10,0.88)';
-    ctx.fillRect(0, 0, size, size);
-    ctx.textAlign = 'center';
-
-    // "GAME OVER"
-    var t = Math.max(11, Math.floor(size * 0.046));
-    ctx.font        = pixelFont(t);
-    ctx.fillStyle   = '#cc2200';
-    ctx.shadowColor = '#cc2200';
-    ctx.shadowBlur  = 16;
-    ctx.fillText('GAME OVER', size / 2, size * 0.30);
-    ctx.shadowBlur = 0;
-
-    // "BREAK" label
-    var bl = Math.max(5, Math.floor(size * 0.020));
-    ctx.font      = pixelFont(bl);
-    ctx.fillStyle = '#444';
-    ctx.fillText('BREAK', size / 2, size * 0.30 + t * 2.0);
-
-    // Break number
-    var sc = Math.max(10, Math.floor(size * 0.044));
-    ctx.font        = pixelFont(sc);
-    ctx.fillStyle   = SNAKE_COLOR;
-    ctx.shadowColor = SNAKE_COLOR;
-    ctx.shadowBlur  = 10;
-    ctx.fillText(String(currentBreak).padStart(3, '0'), size / 2, size * 0.30 + t * 2.0 + bl * 2.0 + sc * 0.9);
-    ctx.shadowBlur = 0;
-
-    // High break line
-    var hi = Math.max(6, Math.floor(size * 0.021));
-    ctx.font      = pixelFont(hi);
-    var isNew     = currentBreak > 0 && currentBreak >= highBreak;
-    ctx.fillStyle = isNew ? '#ffd700' : '#444';
-    ctx.fillText(
-      isNew ? '// NEW HIGH BREAK!' : '// BEST: ' + String(highBreak).padStart(3, '0'),
-      size / 2,
-      size * 0.30 + t * 2.0 + bl * 2.0 + sc * 0.9 + hi * 3.2
-    );
-
-    ctx.textAlign = 'left';
-  }
-
-  function drawWinScreen(size) {
-    ctx.fillStyle = 'rgba(10,10,10,0.92)';
-    ctx.fillRect(0, 0, size, size);
-    ctx.textAlign = 'center';
-
-    var t = Math.max(11, Math.floor(size * 0.046));
-    ctx.font        = pixelFont(t);
-    ctx.fillStyle   = '#ffd700';
-    ctx.shadowColor = '#ffd700';
-    ctx.shadowBlur  = 22;
-    ctx.fillText('FRAME OVER', size / 2, size * 0.28);
-    ctx.shadowBlur  = 0;
-
-    var bl = Math.max(5, Math.floor(size * 0.020));
-    ctx.font      = pixelFont(bl);
-    ctx.fillStyle = '#444';
-    ctx.fillText('BREAK', size / 2, size * 0.28 + t * 2.0);
-
-    var sc = Math.max(10, Math.floor(size * 0.044));
-    ctx.font        = pixelFont(sc);
-    ctx.fillStyle   = SNAKE_COLOR;
-    ctx.shadowColor = SNAKE_COLOR;
-    ctx.shadowBlur  = 10;
-    ctx.fillText(String(currentBreak).padStart(3, '0'), size / 2, size * 0.28 + t * 2.0 + bl * 2.0 + sc * 0.9);
-    ctx.shadowBlur  = 0;
-
-    var hi = Math.max(6, Math.floor(size * 0.021));
-    ctx.font      = pixelFont(hi);
-    var isNew     = currentBreak > 0 && currentBreak >= highBreak;
-    ctx.fillStyle = isNew ? '#ffd700' : '#444';
-    ctx.fillText(
-      isNew ? '// NEW HIGH BREAK!' : '// BEST: ' + String(highBreak).padStart(3, '0'),
-      size / 2,
-      size * 0.28 + t * 2.0 + bl * 2.0 + sc * 0.9 + hi * 3.2
-    );
-
-    ctx.textAlign = 'left';
-  }
-
-  function drawTimeUpScreen(size) {
-    ctx.fillStyle = 'rgba(10,10,10,0.92)';
-    ctx.fillRect(0, 0, size, size);
-    ctx.textAlign = 'center';
-
-    var t = Math.max(11, Math.floor(size * 0.046));
-    ctx.font        = pixelFont(t);
-    ctx.fillStyle   = '#ff8c00';
-    ctx.shadowColor = '#ff8c00';
-    ctx.shadowBlur  = 22;
-    ctx.fillText("TIME'S UP", size / 2, size * 0.28);
-    ctx.shadowBlur  = 0;
-
-    var bl = Math.max(5, Math.floor(size * 0.020));
-    ctx.font      = pixelFont(bl);
-    ctx.fillStyle = '#444';
-    ctx.fillText('BREAK', size / 2, size * 0.28 + t * 2.0);
-
-    var sc = Math.max(10, Math.floor(size * 0.044));
-    ctx.font        = pixelFont(sc);
-    ctx.fillStyle   = SNAKE_COLOR;
-    ctx.shadowColor = SNAKE_COLOR;
-    ctx.shadowBlur  = 10;
-    ctx.fillText(String(currentBreak).padStart(3, '0'), size / 2, size * 0.28 + t * 2.0 + bl * 2.0 + sc * 0.9);
-    ctx.shadowBlur  = 0;
-
-    var hi = Math.max(6, Math.floor(size * 0.021));
-    ctx.font      = pixelFont(hi);
-    var isNew     = currentBreak > 0 && currentBreak >= highBreak;
-    ctx.fillStyle = isNew ? '#ffd700' : '#444';
-    ctx.fillText(
-      isNew ? '// NEW HIGH BREAK!' : '// BEST: ' + String(highBreak).padStart(3, '0'),
-      size / 2,
-      size * 0.28 + t * 2.0 + bl * 2.0 + sc * 0.9 + hi * 3.2
-    );
-
-    ctx.textAlign = 'left';
-  }
-
-  // ============================================================
-  // Keyboard input
-  // ============================================================
-  var KEY_DIRS = {
-    ArrowUp:    { dx: 0, dy: -1 }, ArrowDown:  { dx: 0, dy: 1 },
-    ArrowLeft:  { dx: -1, dy: 0 }, ArrowRight: { dx: 1, dy: 0 },
-    w: { dx: 0, dy: -1 }, s: { dx: 0, dy: 1 },
-    a: { dx: -1, dy: 0 }, d: { dx: 1, dy: 0 },
-    W: { dx: 0, dy: -1 }, S: { dx: 0, dy: 1 },
-    A: { dx: -1, dy: 0 }, D: { dx: 1, dy: 0 },
-  };
-
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      if ((gameState === 'start' || gameState === 'gameover' || gameState === 'win' || gameState === 'timeup') && canRestart()) startGame();
-      return;
+    // Stripe band clipped inside ball outline
+    if (stripe) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.fillStyle = color;
+      ctx.fillRect(x - r, y - r * 0.42, r * 2, r * 0.84);
+      ctx.restore();
     }
-    var dir = KEY_DIRS[e.key];
-    if (!dir) return;
-    e.preventDefault();
+
+    ctx.shadowBlur = 0;
+
+    // Number spot (white circle + digit)
+    if (r > 9) {
+      ctx.beginPath();
+      ctx.arc(x, y, r * 0.4, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+      ctx.fillStyle = '#111111';
+      ctx.font = 'bold ' + Math.max(7, Math.floor(r * 0.52)) + 'px sans-serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(number, x, y + r * 0.04);
+    }
+
+    // Specular highlight
+    ctx.beginPath();
+    ctx.arc(x - r * 0.28, y - r * 0.28, r * 0.19, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.48)';
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+  }
+
+  // ── Potted strip ───────────────────────────────────────────────────────────
+  function drawPottedStrip() {
+    if (!pottedBalls || pottedBalls.length === 0) return;
+
+    const stripY  = H - POTTED_H;
+    const labelSz = Math.max(6, Math.floor(POTTED_H * 0.16));
+    const r       = Math.min(BALL_R * 0.56, POTTED_H * 0.29);
+
+    ctx.fillStyle    = 'rgba(255,255,255,0.27)';
+    ctx.font         = labelSz + 'px "Press Start 2P", monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('POTTED', CUSHION * 0.5, stripY + POTTED_H * 0.27);
+
+    const startX  = CUSHION * 0.5 + W * 0.13;
+    const ballY   = stripY + POTTED_H * 0.66;
+    const spacing = r * 2.5;
+
+    for (let i = 0; i < pottedBalls.length; i++) {
+      const b = pottedBalls[i];
+      drawOneBall(startX + i * spacing, ballY, b.color, b.number, b.stripe, 0.92);
+    }
+  }
+
+  // ── HUD ────────────────────────────────────────────────────────────────────
+  function drawHUD(ts) {
     if (gameState === 'playing') {
-      queueDir(dir);
-    } else if ((gameState === 'start' || gameState === 'gameover' || gameState === 'win' || gameState === 'timeup') && canRestart()) {
-      startGame(); queueDir(dir);
-    }
-  });
-
-  // ============================================================
-  // Touch / swipe input
-  // ============================================================
-  var t0x, t0y;
-
-  canvas.addEventListener('touchstart', function (e) {
-    t0x = e.touches[0].clientX;
-    t0y = e.touches[0].clientY;
-    e.preventDefault();
-  }, { passive: false });
-
-  canvas.addEventListener('touchend', function (e) {
-    if (t0x === undefined) return;
-    var dx = e.changedTouches[0].clientX - t0x;
-    var dy = e.changedTouches[0].clientY - t0y;
-    var adx = Math.abs(dx), ady = Math.abs(dy);
-    t0x = t0y = undefined;
-    e.preventDefault();
-
-    if (Math.max(adx, ady) < 20) {
-      if ((gameState === 'start' || gameState === 'gameover' || gameState === 'win' || gameState === 'timeup') && canRestart()) startGame();
-      return;
+      elapsed = (performance.now() - gameStartTime) / 1000;
     }
 
-    var dir = adx > ady
-      ? (dx > 0 ? { dx: 1, dy: 0 } : { dx: -1, dy: 0 })
-      : (dy > 0 ? { dx: 0, dy: 1 } : { dx: 0, dy: -1 });
+    if (gameState === 'start') return;
 
-    if ((gameState === 'start' || gameState === 'gameover' || gameState === 'win' || gameState === 'timeup') && canRestart()) { startGame(); queueDir(dir); }
-    else if (gameState === 'playing') queueDir(dir);
-  }, { passive: false });
+    const sz = Math.max(7, Math.floor(CUSHION * 0.56));
+    ctx.font         = sz + 'px "Press Start 2P", monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = 'rgba(255,255,255,0.6)';
 
-  // ============================================================
-  // D-pad input
-  // ============================================================
-  var DPAD_DIRS = {
-    up: { dx: 0, dy: -1 }, down:  { dx: 0, dy: 1 },
-    left: { dx: -1, dy: 0 }, right: { dx: 1, dy: 0 },
-  };
+    // Timer — top left
+    ctx.textAlign = 'left';
+    ctx.fillText(fmtTime(elapsed), TABLE_X + 6, TABLE_Y + 5);
 
-  document.querySelectorAll('.dpad-btn').forEach(function (btn) {
-    function press() {
-      var dir = DPAD_DIRS[btn.dataset.dir];
-      if (!dir) return;
-      if ((gameState === 'start' || gameState === 'gameover' || gameState === 'win' || gameState === 'timeup') && canRestart()) { startGame(); queueDir(dir); }
-      else if (gameState === 'playing') queueDir(dir);
+    // Balls remaining — top right
+    if (gameState === 'playing' && balls.length > 0) {
+      const rem = balls.length - pottedBalls.length;
+      ctx.textAlign = 'right';
+      ctx.fillText(rem + ' LEFT', TABLE_X + TABLE_W - 6, TABLE_Y + 5);
     }
-    btn.addEventListener('click', press);
-    btn.addEventListener('mousedown', function (e) { e.preventDefault(); });
-  });
 
-  // ============================================================
-  // Action & Restart buttons
-  // ============================================================
-  actionBtn.addEventListener('click', function () {
-    if ((gameState === 'start' || gameState === 'gameover' || gameState === 'win' || gameState === 'timeup') && canRestart()) startGame();
-  });
+    // Bonus tier hint — bottom of felt
+    drawBonusTierHint(sz, ts);
 
-  restartBtn.addEventListener('click', startGame);
-
-  // ============================================================
-  // Settings buttons
-  // ============================================================
-  document.querySelectorAll('.setting-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var setting = btn.dataset.setting;
-      var value   = btn.dataset.value;
-      settings[setting] = (setting === 'reds' || setting === 'timer') ? parseInt(value, 10) : value;
-      document.querySelectorAll('.setting-btn[data-setting="' + setting + '"]').forEach(function (b) {
-        b.classList.toggle('setting-btn--active', b.dataset.value === value);
-      });
-      if (gameState === 'start') draw(0);
-    });
-  });
-
-  // ============================================================
-  // Window resize — pause if playing, resize canvas, redraw
-  // ============================================================
-  var resizeTimer;
-  window.addEventListener('resize', function () {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(function () {
-      resizeCanvas();
-      if (gameState !== 'playing') draw(0);
-    }, 200);
-  });
-
-  // ============================================================
-  // Boot
-  // ============================================================
-  hiEl.textContent = highBreak;
-  syncUI();
-  updateHUD();
-
-  function boot() { resizeCanvas(); draw(0); }
-
-  if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(boot);
-  } else {
-    setTimeout(boot, 150);
+    // Flash message (pot notification)
+    if (msgText && ts < msgExpiry) {
+      const a = Math.min(1, (msgExpiry - ts) / 320);
+      ctx.globalAlpha  = a;
+      ctx.fillStyle    = '#ffeb3b';
+      ctx.shadowColor  = '#ffeb3b';
+      ctx.shadowBlur   = 14;
+      ctx.font         = 'bold ' + Math.max(11, sz * 1.35) + 'px "Press Start 2P", monospace';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(msgText, W / 2, TABLE_Y + TABLE_H * 0.1);
+      ctx.shadowBlur   = 0;
+      ctx.globalAlpha  = 1;
+    }
   }
 
+  function drawBonusTierHint(sz) {
+    if (gameState !== 'playing') return;
+    const [t1, t2, t3] = settings.timeLimits;
+    const [m1, m2, m3] = settings.multipliers;
+    const tiers = [
+      { t: t1, m: m1, color: '#ffd700' },
+      { t: t2, m: m2, color: '#aaaaaa' },
+      { t: t3, m: m3, color: '#cd7f32' },
+    ];
+    const hsz = Math.max(5, Math.floor(sz * 0.68));
+    ctx.font         = hsz + 'px "Press Start 2P", monospace';
+    ctx.textBaseline = 'bottom';
+    let x = TABLE_X + 6;
+    const y = TABLE_Y + TABLE_H - 4;
+    for (const tier of tiers) {
+      const active = elapsed < tier.t;
+      ctx.globalAlpha = active ? 1 : 0.32;
+      ctx.fillStyle   = tier.color;
+      ctx.textAlign   = 'left';
+      const label = '\xD7' + tier.m + '<' + tier.t + 's  ';
+      ctx.fillText(label, x, y);
+      x += ctx.measureText(label).width;
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ── Overlay screens ────────────────────────────────────────────────────────
+  function drawOverlay(ts) {
+    ctx.fillStyle = 'rgba(0,0,0,0.74)';
+    ctx.fillRect(TABLE_X, TABLE_Y, TABLE_W, TABLE_H);
+
+    const cx = TABLE_X + TABLE_W / 2;
+    const cy = TABLE_Y + TABLE_H / 2;
+    const px = Math.max(9, Math.floor(CUSHION * 0.72));
+
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    if (gameState === 'start') {
+      ctx.shadowColor = '#00ff41';
+      ctx.shadowBlur  = 18;
+      ctx.fillStyle   = '#00ff41';
+      ctx.font        = px * 1.4 + 'px "Press Start 2P", monospace';
+      ctx.fillText('POOL SNAKE', cx, cy - px * 3.5);
+      ctx.shadowBlur  = 0;
+
+      ctx.fillStyle = 'rgba(255,255,255,0.58)';
+      ctx.font      = px * 0.63 + 'px "Press Start 2P", monospace';
+      ctx.fillText('GUIDE SNAKE → BREAK THE RACK', cx, cy - px * 1.3);
+      ctx.fillText('POT ALL BALLS FOR TIME BONUS', cx, cy + px * 0.15);
+
+      if (Math.sin(ts / 520) > 0) {
+        ctx.fillStyle = '#00ff41';
+        ctx.font      = px * 0.78 + 'px "Press Start 2P", monospace';
+        ctx.fillText('PRESS SPACE TO START', cx, cy + px * 2.3);
+      }
+
+    } else if (gameState === 'win') {
+      ctx.shadowColor = '#ffd700';
+      ctx.shadowBlur  = 20;
+      ctx.fillStyle   = '#ffd700';
+      ctx.font        = px * 1.3 + 'px "Press Start 2P", monospace';
+      ctx.fillText('CLEARED!', cx, cy - px * 3.8);
+      ctx.shadowBlur  = 0;
+
+      ctx.fillStyle = 'rgba(255,255,255,0.72)';
+      ctx.font      = px * 0.63 + 'px "Press Start 2P", monospace';
+      ctx.fillText('TIME:  ' + fmtTime(elapsed),          cx, cy - px * 2.1);
+      ctx.fillText('BALLS: ' + score + ' \xD7 1pt',       cx, cy - px * 0.9);
+
+      if (finalMultiplier > 1) {
+        ctx.fillStyle = '#00ff41';
+        ctx.font      = px * 0.78 + 'px "Press Start 2P", monospace';
+        ctx.fillText('BONUS  \xD7' + finalMultiplier,     cx, cy + px * 0.55);
+      }
+
+      ctx.shadowColor = '#ffd700';
+      ctx.shadowBlur  = 12;
+      ctx.fillStyle   = '#ffd700';
+      ctx.font        = px * 1.0 + 'px "Press Start 2P", monospace';
+      ctx.fillText('SCORE: ' + finalScore,                 cx, cy + px * 2.1);
+      ctx.shadowBlur  = 0;
+
+      if (finalScore >= bestScore && finalScore > 0) {
+        ctx.fillStyle = '#ff80ab';
+        ctx.font      = px * 0.58 + 'px "Press Start 2P", monospace';
+        ctx.fillText('★ NEW BEST ★',             cx, cy + px * 3.3);
+      }
+
+      if (Math.sin(ts / 520) > 0) {
+        ctx.fillStyle = 'rgba(255,255,255,0.48)';
+        ctx.font      = px * 0.56 + 'px "Press Start 2P", monospace';
+        ctx.fillText('PRESS SPACE TO PLAY AGAIN',          cx, cy + px * 4.5);
+      }
+
+    } else if (gameState === 'gameover') {
+      ctx.shadowColor = '#cc2200';
+      ctx.shadowBlur  = 16;
+      ctx.fillStyle   = '#cc2200';
+      ctx.font        = px * 1.3 + 'px "Press Start 2P", monospace';
+      ctx.fillText('GAME OVER',                            cx, cy - px * 2.5);
+      ctx.shadowBlur  = 0;
+
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.font      = px * 0.63 + 'px "Press Start 2P", monospace';
+      ctx.fillText('POTTED  ' + score + ' / ' + (balls ? balls.length : 0), cx, cy - px * 0.55);
+      ctx.fillText('TIME    ' + fmtTime(elapsed),          cx, cy + px * 0.65);
+
+      if (Math.sin(ts / 520) > 0) {
+        ctx.fillStyle = '#00ff41';
+        ctx.font      = px * 0.68 + 'px "Press Start 2P", monospace';
+        ctx.fillText('PRESS SPACE TO RETRY',               cx, cy + px * 2.3);
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Utilities
+  // ─────────────────────────────────────────────────────────────────────────────
+  function rrFill(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y,     x + w, y + r,     r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x,     y + h, x,     y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x,     y,     x + r, y,         r);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function fmtTime(secs) {
+    const s = Math.floor(secs || 0);
+    const d = Math.floor(((secs || 0) - s) * 10);
+    if (s < 60) return String(s).padStart(2, '0') + '.' + d + 's';
+    return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + '.' + d + 's';
+  }
+
+  function showMsg(text) {
+    msgText   = text;
+    msgExpiry = performance.now() + 1050;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Game loop
+  // ─────────────────────────────────────────────────────────────────────────────
+  function gameLoop(ts) {
+    requestAnimationFrame(gameLoop);
+    const dt = Math.min(50, ts - (lastFrameTime || ts));
+    lastFrameTime = ts;
+
+    if (gameState === 'playing') {
+      physicsStep(dt);
+      if (ts - lastStepTime >= SPEEDS[settings.speed]) {
+        lastStepTime = ts;
+        snakeStep();
+      }
+    }
+
+    draw(ts);
+    updateNavScore();
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // UI wiring
+  // ─────────────────────────────────────────────────────────────────────────────
+  function updateScoreUI() {
+    const sv = document.getElementById('score-val');
+    const hv = document.getElementById('hi-val');
+    const ov = document.getElementById('on-val');
+    if (sv) sv.textContent = gameState === 'win' ? finalScore : score;
+    if (hv) hv.textContent = bestScore;
+    if (ov) {
+      if (gameState === 'playing' && balls) {
+        ov.textContent = balls.length - pottedBalls.length;
+      } else {
+        ov.textContent = '-';
+      }
+    }
+  }
+
+  function updateNavScore() {
+    const ns = document.getElementById('nav-score-val');
+    if (ns) ns.textContent = gameState === 'win' ? finalScore : score;
+  }
+
+  function setupSettingsUI() {
+    // Ball count
+    document.querySelectorAll('[data-setting="ballCount"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (gameState === 'playing') return;
+        settings.ballCount = parseInt(btn.dataset.value, 10);
+        document.querySelectorAll('[data-setting="ballCount"]').forEach(b =>
+          b.classList.toggle('setting-btn--active', b === btn));
+      });
+    });
+
+    // Speed
+    document.querySelectorAll('[data-setting="speed"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        settings.speed = btn.dataset.value;
+        document.querySelectorAll('[data-setting="speed"]').forEach(b =>
+          b.classList.toggle('setting-btn--active', b === btn));
+      });
+    });
+
+    // Time limits — live-editable; affect win calculation in real time
+    document.querySelectorAll('[data-timelimit]').forEach(input => {
+      const idx = parseInt(input.dataset.timelimit, 10);
+      input.value = settings.timeLimits[idx];
+      input.addEventListener('input', () => {
+        const v = parseInt(input.value, 10);
+        if (v >= 1) settings.timeLimits[idx] = v;
+      });
+    });
+
+    // Multipliers — live-editable
+    document.querySelectorAll('[data-multiplier]').forEach(input => {
+      const idx = parseInt(input.dataset.multiplier, 10);
+      input.value = settings.multipliers[idx];
+      input.addEventListener('input', () => {
+        const v = parseInt(input.value, 10);
+        if (v >= 1) settings.multipliers[idx] = v;
+      });
+    });
+
+    const actionBtn  = document.getElementById('action-btn');
+    const restartBtn = document.getElementById('restart-btn');
+
+    if (actionBtn) {
+      actionBtn.addEventListener('click', () => {
+        if (gameState !== 'playing') {
+          initGame();
+          actionBtn.hidden  = true;
+          restartBtn.hidden = false;
+        }
+      });
+    }
+    if (restartBtn) {
+      restartBtn.addEventListener('click', () => {
+        initGame();
+      });
+    }
+  }
+
+  function setupInput() {
+    const actionBtn  = document.getElementById('action-btn');
+    const restartBtn = document.getElementById('restart-btn');
+
+    function startOrQueue(dx, dy) {
+      if (gameState !== 'playing') {
+        initGame();
+        if (actionBtn)  actionBtn.hidden  = true;
+        if (restartBtn) restartBtn.hidden = false;
+      } else if (dx !== undefined) {
+        queueDir(dx, dy);
+      }
+    }
+
+    document.addEventListener('keydown', e => {
+      // Don't intercept keys when a settings number input is focused
+      if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+
+      const map = {
+        ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+        w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0],
+        W: [0, -1], S: [0, 1], A: [-1, 0], D: [1, 0],
+      };
+      const dd = map[e.key];
+      if (dd) {
+        e.preventDefault();
+        if (gameState === 'playing') queueDir(dd[0], dd[1]);
+      }
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        startOrQueue();
+      }
+    });
+
+    // Touch swipe on canvas
+    let tx0 = 0, ty0 = 0;
+    canvas.addEventListener('touchstart', e => {
+      tx0 = e.touches[0].clientX;
+      ty0 = e.touches[0].clientY;
+    }, { passive: true });
+    canvas.addEventListener('touchend', e => {
+      if (!e.changedTouches.length) return;
+      const ddx = e.changedTouches[0].clientX - tx0;
+      const ddy = e.changedTouches[0].clientY - ty0;
+      const ad  = Math.abs(ddx), ay = Math.abs(ddy);
+      if (Math.max(ad, ay) < 18) {
+        startOrQueue();
+      } else if (ad > ay) {
+        startOrQueue(ddx > 0 ? 1 : -1, 0);
+      } else {
+        startOrQueue(0, ddy > 0 ? 1 : -1);
+      }
+    }, { passive: true });
+
+    // D-pad
+    const dirMap = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+    document.querySelectorAll('.dpad-btn').forEach(btn => {
+      const handler = () => {
+        const dd = dirMap[btn.dataset.dir];
+        if (dd) startOrQueue(dd[0], dd[1]);
+      };
+      btn.addEventListener('mousedown', handler);
+      btn.addEventListener('touchstart', handler, { passive: true });
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Boot
+  // ─────────────────────────────────────────────────────────────────────────────
+  function boot() {
+    canvas    = document.getElementById('game-canvas');
+    ctx       = canvas.getContext('2d');
+    bestScore = parseInt(localStorage.getItem('poolsnake_best') || '0', 10);
+
+    calcLayout();
+    window.addEventListener('resize', () => {
+      calcLayout();
+      if (gameState !== 'playing') draw(0);
+    });
+
+    // Initialise display state before first game
+    balls           = [];
+    pottedBalls     = [];
+    snake           = [];
+    score           = 0;
+    elapsed         = 0;
+    finalScore      = 0;
+    finalMultiplier = 0;
+    msgText         = '';
+    msgExpiry       = 0;
+
+    setupInput();
+    setupSettingsUI();
+    updateScoreUI();
+
+    requestAnimationFrame(gameLoop);
+  }
+
+  document.addEventListener('DOMContentLoaded', boot);
 }());

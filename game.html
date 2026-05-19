@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <meta name="description" content="Play SERPENTINE — a snake-like game playable on web and mobile.">
-  <title>SERPENTINE — Play</title>
+  <meta name="description" content="Pool Snake — guide the snake to break and pot pool balls.">
+  <title>POOL SNAKE — Play</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Roboto+Mono:wght@300;400;500&display=swap" rel="stylesheet">
@@ -16,10 +16,10 @@
   <header class="site-header site-header--scrolled" role="banner">
     <nav class="nav-container" aria-label="Game navigation">
       <a href="index.html" class="nav-logo" aria-label="Back to home">
-        <span class="logo-bracket">[</span>SERPENTINE<span class="logo-bracket">]</span>
+        <span class="logo-bracket">[</span>POOL SNAKE<span class="logo-bracket">]</span>
       </a>
       <div class="nav-game-score" aria-live="polite">
-        BREAK: <span id="nav-score-val">0</span>
+        SCORE: <span id="nav-score-val">0</span>
       </div>
     </nav>
   </header>
@@ -28,12 +28,12 @@
     <div class="game-wrapper">
 
       <div class="canvas-wrap">
-        <canvas id="game-canvas" aria-label="Snake game board"></canvas>
+        <canvas id="game-canvas" aria-label="Pool Snake game board"></canvas>
       </div>
 
       <div class="score-bar">
         <div class="score-item">
-          <span class="score-label">BREAK</span>
+          <span class="score-label">SCORE</span>
           <span class="score-value" id="score-val">0</span>
         </div>
         <div class="score-item">
@@ -41,53 +41,49 @@
           <span class="score-value" id="hi-val">0</span>
         </div>
         <div class="score-item">
-          <span class="score-label">ON</span>
-          <span class="score-value score-value--on" id="on-val">RED</span>
+          <span class="score-label">BALLS</span>
+          <span class="score-value score-value--on" id="on-val">-</span>
         </div>
       </div>
 
       <div class="settings-panel">
         <div class="setting-row">
-          <span class="setting-label">BOARD</span>
-          <div class="setting-options" role="group" aria-label="Board size">
-            <button class="setting-btn" data-setting="size" data-value="small">S</button>
-            <button class="setting-btn setting-btn--active" data-setting="size" data-value="medium">M</button>
-            <button class="setting-btn" data-setting="size" data-value="large">L</button>
+          <span class="setting-label">BALLS</span>
+          <div class="setting-options" role="group" aria-label="Number of balls">
+            <button class="setting-btn" data-setting="ballCount" data-value="6">6</button>
+            <button class="setting-btn setting-btn--active" data-setting="ballCount" data-value="10">10</button>
+            <button class="setting-btn" data-setting="ballCount" data-value="15">15</button>
           </div>
         </div>
         <div class="setting-row">
           <span class="setting-label">SPEED</span>
-          <div class="setting-options" role="group" aria-label="Game speed">
+          <div class="setting-options" role="group" aria-label="Snake speed">
             <button class="setting-btn" data-setting="speed" data-value="slow">SLOW</button>
             <button class="setting-btn setting-btn--active" data-setting="speed" data-value="normal">NORM</button>
             <button class="setting-btn" data-setting="speed" data-value="fast">FAST</button>
           </div>
         </div>
-        <div class="setting-row">
-          <span class="setting-label">REDS</span>
-          <div class="setting-options" role="group" aria-label="Number of reds">
-            <button class="setting-btn" data-setting="reds" data-value="3">3</button>
-            <button class="setting-btn" data-setting="reds" data-value="5">5</button>
-            <button class="setting-btn setting-btn--active" data-setting="reds" data-value="8">8</button>
-            <button class="setting-btn" data-setting="reds" data-value="10">10</button>
-          </div>
-        </div>
-        <div class="setting-row">
-          <span class="setting-label">WALLS</span>
-          <div class="setting-options" role="group" aria-label="Wall behaviour">
-            <button class="setting-btn setting-btn--active" data-setting="walls" data-value="solid">SOLID</button>
-            <button class="setting-btn" data-setting="walls" data-value="wrap">WRAP</button>
-          </div>
-        </div>
-        <div class="setting-row">
-          <span class="setting-label">TIMER</span>
-          <div class="setting-options" role="group" aria-label="Countdown timer">
-            <button class="setting-btn setting-btn--active" data-setting="timer" data-value="0">OFF</button>
-            <button class="setting-btn" data-setting="timer" data-value="20">20S</button>
-            <button class="setting-btn" data-setting="timer" data-value="30">30S</button>
-            <button class="setting-btn" data-setting="timer" data-value="50">50S</button>
-            <button class="setting-btn" data-setting="timer" data-value="60">1M</button>
-            <button class="setting-btn" data-setting="timer" data-value="120">2M</button>
+        <div class="setting-row setting-row--bonus">
+          <span class="setting-label">BONUS</span>
+          <div class="bonus-tiers">
+            <label class="bonus-tier">
+              <span class="tier-mult">×<input class="tier-input" type="number" data-multiplier="0" value="6" min="1" max="99"></span>
+              <span class="tier-sep">≤</span>
+              <input class="tier-input tier-input--time" type="number" data-timelimit="0" value="20" min="1" max="999">
+              <span class="tier-unit">s</span>
+            </label>
+            <label class="bonus-tier">
+              <span class="tier-mult">×<input class="tier-input" type="number" data-multiplier="1" value="4" min="1" max="99"></span>
+              <span class="tier-sep">≤</span>
+              <input class="tier-input tier-input--time" type="number" data-timelimit="1" value="50" min="1" max="999">
+              <span class="tier-unit">s</span>
+            </label>
+            <label class="bonus-tier">
+              <span class="tier-mult">×<input class="tier-input" type="number" data-multiplier="2" value="2" min="1" max="99"></span>
+              <span class="tier-sep">≤</span>
+              <input class="tier-input tier-input--time" type="number" data-timelimit="2" value="70" min="1" max="999">
+              <span class="tier-unit">s</span>
+            </label>
           </div>
         </div>
       </div>
