@@ -39,14 +39,16 @@
   };
 
   // ─── Game state ───────────────────────────────────────────────────────────────
-  let gameState = 'start'; // 'start' | 'playing' | 'win' | 'gameover'
+  // 'start' | 'playing' | 'round_clear' | 'gameover'
+  let gameState = 'start';
   let snake, dir, nextDir;
   let balls, pottedBalls;
-  let score, bestScore;
+  let score, bestScore, totalScore;
+  let roundNumber, completedRounds;
+  let lastRoundScore, lastRoundMultiplier;
   let gameStartTime, elapsed;
   let lastStepTime;
   let msgText, msgExpiry;
-  let finalMultiplier, finalScore;
   let growPending = 0;
   let lastFrameTime = 0;
 
@@ -85,10 +87,10 @@
     POCKET_R = Math.max(10, CUSHION * 0.82);
 
     // Corner pockets: same visual but larger detection zone.
-    // Mid pockets: visually bigger, directional-only potting (ball must be heading in).
-    const midDrawR = POCKET_R;          // same visual size as corners
-    const midPotR  = POCKET_R * 1.30;  // detection zone stays generous
-    const crnPotR  = POCKET_R * 1.50; // generous invisible catch zone
+    // Mid pockets: same visual size as corners, directional-only potting.
+    const midDrawR = POCKET_R;
+    const midPotR  = POCKET_R * 1.30;
+    const crnPotR  = POCKET_R * 1.50;
 
     POCKETS = [
       { x: TABLE_X,               y: TABLE_Y,           drawR: POCKET_R, potR: crnPotR, directional: false }, // TL
@@ -109,7 +111,7 @@
     GRID_COLS = 18;
     CELL_W    = INNER_W / GRID_COLS;
     GRID_ROWS = Math.max(1, Math.floor(INNER_H / CELL_W));
-    BALL_R    = CELL_W * 0.74; // diameter > one cell → always hittable
+    BALL_R    = CELL_W * 0.74;
   }
 
   function cellToPixel(gx, gy) {
@@ -126,11 +128,9 @@
     const rowMap  = { 6: 3, 10: 4, 15: 5 };
     const numRows = rowMap[count] || 4;
 
-    // Spacing slightly > 2r so balls start separated (prevents initial overlap)
     const spacing = BALL_R * 2.08;
-    const dx      = spacing * Math.sqrt(3) / 2; // horizontal step per row
+    const dx      = spacing * Math.sqrt(3) / 2;
 
-    // Apex (leftmost ball of triangle) ~60 % across the table, vertically centred
     const triW  = (numRows - 1) * dx;
     const apexX = TABLE_X + TABLE_W * 0.62 - triW / 2;
     const apexY = TABLE_Y + TABLE_H * 0.5;
@@ -194,8 +194,6 @@
         const dist = Math.sqrt(pdx * pdx + pdy * pdy);
         if (dist < p.potR + BALL_R * 0.25) {
           if (p.directional) {
-            // Mid pockets only accept balls moving toward them (not rolling past).
-            // dot(velocity, pocket - ball) > 0 means heading in.
             const dot = b.vx * (-pdx) + b.vy * (-pdy);
             if (dot <= 0) continue;
           }
@@ -207,7 +205,7 @@
       if (b.hitCooldown > 0) b.hitCooldown = Math.max(0, b.hitCooldown - dt);
     }
 
-    // Ball–ball elastic collisions (multiple iterations for stability in clusters)
+    // Ball–ball elastic collisions
     const active = balls.filter(b => !b.potted);
     for (let iter = 0; iter < PHYS_ITERS; iter++) {
       for (let i = 0; i < active.length; i++) {
@@ -247,15 +245,17 @@
     ball.vy = 0;
     pottedBalls.push({ ...ball });
     score += 1;
+    growPending += 1;
     updateScoreUI();
     showMsg('POT! +1');
-    if (pottedBalls.length === balls.length) endGame(true);
+    if (pottedBalls.length === balls.length) completeRound();
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Snake
   // ─────────────────────────────────────────────────────────────────────────────
   function initGame() {
+    // Full reset — snake back to 3 segments
     const midRow = Math.floor(GRID_ROWS / 2);
     snake = [
       { x: 2, y: midRow },
@@ -265,30 +265,58 @@
     dir     = { dx: 1, dy: 0 };
     nextDir = null;
 
-    balls           = createTriangle(settings.ballCount);
-    pottedBalls     = [];
-    score           = 0;
-    elapsed         = 0;
-    gameStartTime   = performance.now();
-    lastStepTime    = performance.now();
-    msgText         = '';
-    msgExpiry       = 0;
-    finalMultiplier = 0;
-    finalScore      = 0;
-    gameState       = 'playing';
+    balls            = createTriangle(settings.ballCount);
+    pottedBalls      = [];
+    score            = 0;
+    totalScore       = 0;
+    roundNumber      = 1;
+    completedRounds  = 0;
+    lastRoundScore   = 0;
+    lastRoundMultiplier = 0;
+    elapsed          = 0;
+    growPending      = 0;
+    gameStartTime    = performance.now();
+    lastStepTime     = performance.now();
+    msgText          = '';
+    msgExpiry        = 0;
+    gameState        = 'playing';
     updateScoreUI();
   }
 
-  function resetSnake() {
-    const midRow = Math.floor(GRID_ROWS / 2);
-    snake = [
-      { x: 2, y: midRow },
-      { x: 1, y: midRow },
-      { x: 0, y: midRow },
-    ];
-    dir     = { dx: 1, dy: 0 };
-    nextDir = null;
-    showMsg('OOPS!');
+  function startNextRound() {
+    // Re-rack balls; snake keeps its current length and direction
+    roundNumber++;
+    balls       = createTriangle(settings.ballCount);
+    pottedBalls = [];
+    score       = 0;
+    elapsed     = 0;
+    gameStartTime = performance.now();
+    lastStepTime  = performance.now();
+    msgText     = '';
+    msgExpiry   = 0;
+    gameState   = 'playing';
+    setButtonVisibility('playing');
+    updateScoreUI();
+  }
+
+  function setButtonVisibility(state) {
+    const actionBtn    = document.getElementById('action-btn');
+    const nextRoundBtn = document.getElementById('next-round-btn');
+    const restartBtn   = document.getElementById('restart-btn');
+    if (!actionBtn) return;
+    if (state === 'round_clear') {
+      actionBtn.hidden    = true;
+      nextRoundBtn.hidden = false;
+      restartBtn.hidden   = false;
+    } else if (state === 'playing') {
+      actionBtn.hidden    = true;
+      nextRoundBtn.hidden = true;
+      restartBtn.hidden   = false;
+    } else { // gameover / start
+      actionBtn.hidden    = false;
+      nextRoundBtn.hidden = true;
+      restartBtn.hidden   = true;
+    }
   }
 
   function snakeStep() {
@@ -302,15 +330,20 @@
     const wx = (nx + GRID_COLS) % GRID_COLS;
     const wy = (ny + GRID_ROWS) % GRID_ROWS;
 
+    // Self-collision → game over
     for (let i = 0; i < snake.length - 1; i++) {
       if (snake[i].x === wx && snake[i].y === wy) {
-        resetSnake();
+        endGame();
         return;
       }
     }
 
     snake.unshift({ x: wx, y: wy });
-    snake.pop(); // constant length
+    if (growPending > 0) {
+      growPending--;
+    } else {
+      snake.pop();
+    }
 
     // Hit any ball that overlaps the new head cell
     const { x: hx, y: hy } = cellToPixel(wx, wy);
@@ -320,40 +353,54 @@
       const ddy = b.y - hy;
       const dist = Math.sqrt(ddx * ddx + ddy * ddy);
       if (dist < b.radius + CELL_W * 0.5) {
-        // Push along collision normal (head→ball centre) so side hits go sideways
-        const nx = dist > 0.001 ? ddx / dist : dir.dx;
-        const ny = dist > 0.001 ? ddy / dist : dir.dy;
-        b.vx += nx * POWERS[settings.power];
-        b.vy += ny * POWERS[settings.power];
+        // Push along collision normal (head→ball centre)
+        const cnx = dist > 0.001 ? ddx / dist : dir.dx;
+        const cny = dist > 0.001 ? ddy / dist : dir.dy;
+        b.vx += cnx * POWERS[settings.power];
+        b.vy += cny * POWERS[settings.power];
         b.hitCooldown = HIT_COOLDOWN;
       }
     }
   }
 
   function queueDir(dx, dy) {
-    if (dx === -dir.dx && dy === -dir.dy) return; // prevent 180° reversal
+    if (dx === -dir.dx && dy === -dir.dy) return;
     nextDir = { dx, dy };
   }
 
-  function endGame(won) {
+  // Called when all balls in a round are potted
+  function completeRound() {
     elapsed = (performance.now() - gameStartTime) / 1000;
-    if (won) {
-      const [t1, t2, t3] = settings.timeLimits;
-      const [m1, m2, m3] = settings.multipliers;
-      if      (elapsed <= t1) finalMultiplier = m1;
-      else if (elapsed <= t2) finalMultiplier = m2;
-      else if (elapsed <= t3) finalMultiplier = m3;
-      else                    finalMultiplier = 1;
-      finalScore = Math.round(score * finalMultiplier);
-      if (finalScore > bestScore) {
-        bestScore = finalScore;
-        localStorage.setItem('poolsnake_best', String(bestScore));
-      }
-      gameState = 'win';
-    } else {
-      gameState = 'gameover';
-    }
+    const [t1, t2, t3] = settings.timeLimits;
+    const [m1, m2, m3] = settings.multipliers;
+    if      (elapsed <= t1) lastRoundMultiplier = m1;
+    else if (elapsed <= t2) lastRoundMultiplier = m2;
+    else if (elapsed <= t3) lastRoundMultiplier = m3;
+    else                    lastRoundMultiplier = 1;
+    lastRoundScore = Math.round(score * lastRoundMultiplier);
+    totalScore    += lastRoundScore;
+    completedRounds++;
+    saveBest();
+    gameState = 'round_clear';
+    setButtonVisibility('round_clear');
     updateScoreUI();
+  }
+
+  // Called when snake eats itself
+  function endGame() {
+    elapsed = (performance.now() - gameStartTime) / 1000;
+    totalScore += score; // partial round at ×1
+    saveBest();
+    gameState = 'gameover';
+    setButtonVisibility('gameover');
+    updateScoreUI();
+  }
+
+  function saveBest() {
+    if (totalScore > bestScore) {
+      bestScore = totalScore;
+      localStorage.setItem('poolsnake_best', String(bestScore));
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -374,11 +421,9 @@
 
   // ── Table & pockets ────────────────────────────────────────────────────────
   function drawTable() {
-    // Dark surround
     ctx.fillStyle = '#080808';
     ctx.fillRect(0, 0, W, H);
 
-    // Cushion body (rounded rect)
     ctx.fillStyle = '#155724';
     rrFill(
       CUSHION * 0.32, CUSHION * 0.32,
@@ -386,11 +431,9 @@
       CUSHION * 0.5
     );
 
-    // Felt playing surface
     ctx.fillStyle = '#1b5e20';
     ctx.fillRect(TABLE_X, TABLE_Y, TABLE_W, TABLE_H);
 
-    // Subtle felt texture
     ctx.strokeStyle = 'rgba(0,0,0,0.06)';
     ctx.lineWidth = 1;
     for (let y = TABLE_Y; y < TABLE_Y + TABLE_H; y += 7) {
@@ -400,7 +443,6 @@
       ctx.stroke();
     }
 
-    // Cushion inner edge highlight
     ctx.strokeStyle = 'rgba(255,255,255,0.07)';
     ctx.lineWidth = 1.5;
     ctx.strokeRect(TABLE_X, TABLE_Y, TABLE_W, TABLE_H);
@@ -409,25 +451,21 @@
     for (const p of POCKETS) {
       const pr = p.drawR;
 
-      // Dark socket surround (the cut-out in the cushion rail)
       ctx.beginPath();
       ctx.arc(p.x, p.y, pr * 1.22, 0, Math.PI * 2);
       ctx.fillStyle = '#080808';
       ctx.fill();
 
-      // Pocket leather/rubber ring between socket and hole
       ctx.beginPath();
       ctx.arc(p.x, p.y, pr * 1.10, 0, Math.PI * 2);
       ctx.fillStyle = '#1a1008';
       ctx.fill();
 
-      // The hole itself
       ctx.beginPath();
       ctx.arc(p.x, p.y, pr, 0, Math.PI * 2);
       ctx.fillStyle = '#020202';
       ctx.fill();
 
-      // Depth gradient — dark centre fades to nothing at rim (concave illusion)
       const grad = ctx.createRadialGradient(p.x, p.y, pr * 0.2, p.x, p.y, pr);
       grad.addColorStop(0,   'rgba(0,0,0,0.92)');
       grad.addColorStop(0.7, 'rgba(0,0,0,0.45)');
@@ -437,7 +475,6 @@
       ctx.fillStyle = grad;
       ctx.fill();
 
-      // Lit rim arc (upper-left catchlight simulates curved lip)
       ctx.beginPath();
       ctx.arc(p.x, p.y, pr, Math.PI * 1.08, Math.PI * 1.72);
       ctx.strokeStyle = 'rgba(255,240,180,0.22)';
@@ -445,7 +482,6 @@
       ctx.stroke();
     }
 
-    // Potted strip background
     ctx.fillStyle = '#0c0c0c';
     ctx.fillRect(0, H - POTTED_H, W, POTTED_H);
     ctx.strokeStyle = 'rgba(255,255,255,0.07)';
@@ -506,13 +542,11 @@
     ctx.shadowColor = color;
     ctx.shadowBlur  = 9;
 
-    // Body
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fillStyle = stripe ? '#f0f0f0' : color;
     ctx.fill();
 
-    // Stripe band clipped inside ball outline
     if (stripe) {
       ctx.save();
       ctx.beginPath();
@@ -525,7 +559,6 @@
 
     ctx.shadowBlur = 0;
 
-    // Number spot (white circle + digit)
     if (r > 9) {
       ctx.beginPath();
       ctx.arc(x, y, r * 0.4, 0, Math.PI * 2);
@@ -538,7 +571,6 @@
       ctx.fillText(number, x, y + r * 0.04);
     }
 
-    // Specular highlight
     ctx.beginPath();
     ctx.arc(x - r * 0.28, y - r * 0.28, r * 0.19, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255,255,255,0.48)';
@@ -584,21 +616,17 @@
     ctx.textBaseline = 'top';
     ctx.fillStyle    = 'rgba(255,255,255,0.6)';
 
-    // Timer — top left
     ctx.textAlign = 'left';
     ctx.fillText(fmtTime(elapsed), TABLE_X + 6, TABLE_Y + 5);
 
-    // Balls remaining — top right
     if (gameState === 'playing' && balls.length > 0) {
       const rem = balls.length - pottedBalls.length;
       ctx.textAlign = 'right';
       ctx.fillText(rem + ' LEFT', TABLE_X + TABLE_W - 6, TABLE_Y + 5);
     }
 
-    // Bonus tier hint — bottom of felt
     drawBonusTierHint(sz, ts);
 
-    // Flash message (pot notification)
     if (msgText && ts < msgExpiry) {
       const a = Math.min(1, (msgExpiry - ts) / 320);
       ctx.globalAlpha  = a;
@@ -671,42 +699,31 @@
         ctx.fillText('PRESS SPACE TO START', cx, cy + px * 2.3);
       }
 
-    } else if (gameState === 'win') {
-      ctx.shadowColor = '#ffd700';
+    } else if (gameState === 'round_clear') {
+      ctx.shadowColor = '#00ff41';
       ctx.shadowBlur  = 20;
-      ctx.fillStyle   = '#ffd700';
-      ctx.font        = px * 1.3 + 'px "Press Start 2P", monospace';
-      ctx.fillText('CLEARED!', cx, cy - px * 3.8);
+      ctx.fillStyle   = '#00ff41';
+      ctx.font        = px * 1.05 + 'px "Press Start 2P", monospace';
+      ctx.fillText('ROUND ' + roundNumber + ' CLEAR!', cx, cy - px * 3.8);
       ctx.shadowBlur  = 0;
 
       ctx.fillStyle = 'rgba(255,255,255,0.72)';
       ctx.font      = px * 0.63 + 'px "Press Start 2P", monospace';
-      ctx.fillText('TIME:  ' + fmtTime(elapsed),          cx, cy - px * 2.1);
-      ctx.fillText('BALLS: ' + score + ' \xD7 1pt',       cx, cy - px * 0.9);
-
-      if (finalMultiplier > 1) {
-        ctx.fillStyle = '#00ff41';
-        ctx.font      = px * 0.78 + 'px "Press Start 2P", monospace';
-        ctx.fillText('BONUS  \xD7' + finalMultiplier,     cx, cy + px * 0.55);
-      }
+      ctx.fillText('TIME:   ' + fmtTime(elapsed),                         cx, cy - px * 2.1);
+      ctx.fillText('BALLS:  ' + score + '  \xD7' + lastRoundMultiplier,  cx, cy - px * 0.9);
 
       ctx.shadowColor = '#ffd700';
-      ctx.shadowBlur  = 12;
+      ctx.shadowBlur  = 10;
       ctx.fillStyle   = '#ffd700';
-      ctx.font        = px * 1.0 + 'px "Press Start 2P", monospace';
-      ctx.fillText('SCORE: ' + finalScore,                 cx, cy + px * 2.1);
+      ctx.font        = px * 0.78 + 'px "Press Start 2P", monospace';
+      ctx.fillText('ROUND:  +' + lastRoundScore + ' pts',                 cx, cy + px * 0.6);
+      ctx.fillText('TOTAL:  ' + totalScore + ' pts',                      cx, cy + px * 1.9);
       ctx.shadowBlur  = 0;
 
-      if (finalScore >= bestScore && finalScore > 0) {
-        ctx.fillStyle = '#ff80ab';
-        ctx.font      = px * 0.58 + 'px "Press Start 2P", monospace';
-        ctx.fillText('★ NEW BEST ★',             cx, cy + px * 3.3);
-      }
-
       if (Math.sin(ts / 520) > 0) {
-        ctx.fillStyle = 'rgba(255,255,255,0.48)';
-        ctx.font      = px * 0.56 + 'px "Press Start 2P", monospace';
-        ctx.fillText('PRESS SPACE TO PLAY AGAIN',          cx, cy + px * 4.5);
+        ctx.fillStyle = 'rgba(255,255,255,0.52)';
+        ctx.font      = px * 0.63 + 'px "Press Start 2P", monospace';
+        ctx.fillText('SPACE TO CONTINUE', cx, cy + px * 3.5);
       }
 
     } else if (gameState === 'gameover') {
@@ -714,18 +731,31 @@
       ctx.shadowBlur  = 16;
       ctx.fillStyle   = '#cc2200';
       ctx.font        = px * 1.3 + 'px "Press Start 2P", monospace';
-      ctx.fillText('GAME OVER',                            cx, cy - px * 2.5);
+      ctx.fillText('GAME OVER', cx, cy - px * 3.4);
       ctx.shadowBlur  = 0;
 
       ctx.fillStyle = 'rgba(255,255,255,0.6)';
-      ctx.font      = px * 0.63 + 'px "Press Start 2P", monospace';
-      ctx.fillText('POTTED  ' + score + ' / ' + (balls ? balls.length : 0), cx, cy - px * 0.55);
-      ctx.fillText('TIME    ' + fmtTime(elapsed),          cx, cy + px * 0.65);
+      ctx.font      = px * 0.6 + 'px "Press Start 2P", monospace';
+      ctx.fillText('ROUNDS CLEARED: ' + completedRounds, cx, cy - px * 1.7);
+      ctx.fillText('ROUND ' + roundNumber + ':  ' + score + ' balls \xD71', cx, cy - px * 0.55);
+
+      ctx.shadowColor = '#ffd700';
+      ctx.shadowBlur  = 12;
+      ctx.fillStyle   = '#ffd700';
+      ctx.font        = px * 1.0 + 'px "Press Start 2P", monospace';
+      ctx.fillText('TOTAL:  ' + totalScore, cx, cy + px * 0.9);
+      ctx.shadowBlur  = 0;
+
+      if (totalScore >= bestScore && totalScore > 0) {
+        ctx.fillStyle = '#ff80ab';
+        ctx.font      = px * 0.58 + 'px "Press Start 2P", monospace';
+        ctx.fillText('★ NEW BEST ★', cx, cy + px * 2.3);
+      }
 
       if (Math.sin(ts / 520) > 0) {
         ctx.fillStyle = '#00ff41';
         ctx.font      = px * 0.68 + 'px "Press Start 2P", monospace';
-        ctx.fillText('PRESS SPACE TO RETRY',               cx, cy + px * 2.3);
+        ctx.fillText('PRESS SPACE TO RETRY', cx, cy + px * 3.6);
       }
     }
   }
@@ -788,8 +818,8 @@
     const sv = document.getElementById('score-val');
     const hv = document.getElementById('hi-val');
     const ov = document.getElementById('on-val');
-    if (sv) sv.textContent = gameState === 'win' ? finalScore : score;
-    if (hv) hv.textContent = bestScore;
+    if (sv) sv.textContent = totalScore || 0;
+    if (hv) hv.textContent = bestScore  || 0;
     if (ov) {
       if (gameState === 'playing' && balls) {
         ov.textContent = balls.length - pottedBalls.length;
@@ -801,11 +831,10 @@
 
   function updateNavScore() {
     const ns = document.getElementById('nav-score-val');
-    if (ns) ns.textContent = gameState === 'win' ? finalScore : score;
+    if (ns) ns.textContent = totalScore || 0;
   }
 
   function setupSettingsUI() {
-    // Ball count
     document.querySelectorAll('[data-setting="ballCount"]').forEach(btn => {
       btn.addEventListener('click', () => {
         if (gameState === 'playing') return;
@@ -815,7 +844,6 @@
       });
     });
 
-    // Speed
     document.querySelectorAll('[data-setting="speed"]').forEach(btn => {
       btn.addEventListener('click', () => {
         settings.speed = btn.dataset.value;
@@ -823,6 +851,7 @@
           b.classList.toggle('setting-btn--active', b === btn));
       });
     });
+
     document.querySelectorAll('[data-setting="power"]').forEach(btn => {
       btn.addEventListener('click', () => {
         settings.power = btn.dataset.value;
@@ -831,7 +860,6 @@
       });
     });
 
-    // Time limits — live-editable; affect win calculation in real time
     document.querySelectorAll('[data-timelimit]').forEach(input => {
       const idx = parseInt(input.dataset.timelimit, 10);
       input.value = settings.timeLimits[idx];
@@ -841,7 +869,6 @@
       });
     });
 
-    // Multipliers — live-editable
     document.querySelectorAll('[data-multiplier]').forEach(input => {
       const idx = parseInt(input.dataset.multiplier, 10);
       input.value = settings.multipliers[idx];
@@ -851,21 +878,27 @@
       });
     });
 
-    const actionBtn  = document.getElementById('action-btn');
-    const restartBtn = document.getElementById('restart-btn');
+    const actionBtn    = document.getElementById('action-btn');
+    const nextRoundBtn = document.getElementById('next-round-btn');
+    const restartBtn   = document.getElementById('restart-btn');
 
     if (actionBtn) {
       actionBtn.addEventListener('click', () => {
         if (gameState !== 'playing') {
           initGame();
-          actionBtn.hidden  = true;
-          restartBtn.hidden = false;
+          setButtonVisibility('playing');
         }
+      });
+    }
+    if (nextRoundBtn) {
+      nextRoundBtn.addEventListener('click', () => {
+        if (gameState === 'round_clear') startNextRound();
       });
     }
     if (restartBtn) {
       restartBtn.addEventListener('click', () => {
         initGame();
+        setButtonVisibility('playing');
       });
     }
   }
@@ -875,7 +908,9 @@
     const restartBtn = document.getElementById('restart-btn');
 
     function startOrQueue(dx, dy) {
-      if (gameState !== 'playing') {
+      if (gameState === 'round_clear') {
+        startNextRound();
+      } else if (gameState !== 'playing') {
         initGame();
         if (actionBtn)  actionBtn.hidden  = true;
         if (restartBtn) restartBtn.hidden = false;
@@ -885,7 +920,6 @@
     }
 
     document.addEventListener('keydown', e => {
-      // Don't intercept keys when a settings number input is focused
       if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
 
       const map = {
@@ -904,7 +938,6 @@
       }
     });
 
-    // Touch swipe on canvas
     let tx0 = 0, ty0 = 0;
     canvas.addEventListener('touchstart', e => {
       tx0 = e.touches[0].clientX;
@@ -924,7 +957,6 @@
       }
     }, { passive: true });
 
-    // D-pad
     const dirMap = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
     document.querySelectorAll('.dpad-btn').forEach(btn => {
       const handler = () => {
@@ -950,16 +982,18 @@
       if (gameState !== 'playing') draw(0);
     });
 
-    // Initialise display state before first game
-    balls           = [];
-    pottedBalls     = [];
-    snake           = [];
-    score           = 0;
-    elapsed         = 0;
-    finalScore      = 0;
-    finalMultiplier = 0;
-    msgText         = '';
-    msgExpiry       = 0;
+    balls            = [];
+    pottedBalls      = [];
+    snake            = [];
+    score            = 0;
+    totalScore       = 0;
+    elapsed          = 0;
+    completedRounds  = 0;
+    roundNumber      = 1;
+    lastRoundScore   = 0;
+    lastRoundMultiplier = 0;
+    msgText          = '';
+    msgExpiry        = 0;
 
     setupInput();
     setupSettingsUI();
