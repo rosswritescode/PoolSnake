@@ -84,13 +84,19 @@
 
     POCKET_R = Math.max(10, CUSHION * 0.82);
 
+    // Corner pockets: same visual but larger detection zone.
+    // Mid pockets: visually bigger, directional-only potting (ball must be heading in).
+    const midDrawR = POCKET_R * 1.30;
+    const midPotR  = POCKET_R * 1.30;
+    const crnPotR  = POCKET_R * 1.50; // generous invisible catch zone
+
     POCKETS = [
-      { x: TABLE_X,               y: TABLE_Y            }, // TL
-      { x: TABLE_X + TABLE_W / 2, y: TABLE_Y            }, // TM
-      { x: TABLE_X + TABLE_W,     y: TABLE_Y            }, // TR
-      { x: TABLE_X,               y: TABLE_Y + TABLE_H  }, // BL
-      { x: TABLE_X + TABLE_W / 2, y: TABLE_Y + TABLE_H  }, // BM
-      { x: TABLE_X + TABLE_W,     y: TABLE_Y + TABLE_H  }, // BR
+      { x: TABLE_X,               y: TABLE_Y,           drawR: POCKET_R, potR: crnPotR, directional: false }, // TL
+      { x: TABLE_X + TABLE_W / 2, y: TABLE_Y,           drawR: midDrawR, potR: midPotR, directional: true  }, // TM
+      { x: TABLE_X + TABLE_W,     y: TABLE_Y,           drawR: POCKET_R, potR: crnPotR, directional: false }, // TR
+      { x: TABLE_X,               y: TABLE_Y + TABLE_H, drawR: POCKET_R, potR: crnPotR, directional: false }, // BL
+      { x: TABLE_X + TABLE_W / 2, y: TABLE_Y + TABLE_H, drawR: midDrawR, potR: midPotR, directional: true  }, // BM
+      { x: TABLE_X + TABLE_W,     y: TABLE_Y + TABLE_H, drawR: POCKET_R, potR: crnPotR, directional: false }, // BR
     ];
 
     // Snake grid sits inside the table, clear of corner pockets
@@ -181,11 +187,18 @@
       if (b.y < minY) { b.y = minY; b.vy =  Math.abs(b.vy) * WALL_REST; }
       if (b.y > maxY) { b.y = maxY; b.vy = -Math.abs(b.vy) * WALL_REST; }
 
-      // Pocket detection (slightly generous entry zone for playability)
+      // Pocket detection
       for (const p of POCKETS) {
-        const pdx = b.x - p.x;
-        const pdy = b.y - p.y;
-        if (Math.sqrt(pdx * pdx + pdy * pdy) < POCKET_R + BALL_R * 0.25) {
+        const pdx  = b.x - p.x;
+        const pdy  = b.y - p.y;
+        const dist = Math.sqrt(pdx * pdx + pdy * pdy);
+        if (dist < p.potR + BALL_R * 0.25) {
+          if (p.directional) {
+            // Mid pockets only accept balls moving toward them (not rolling past).
+            // dot(velocity, pocket - ball) > 0 means heading in.
+            const dot = b.vx * (-pdx) + b.vy * (-pdy);
+            if (dot <= 0) continue;
+          }
           potBall(b);
           break;
         }
@@ -388,9 +401,10 @@
 
     // Pockets
     for (const p of POCKETS) {
+      const pr = p.drawR;
       // Black hole
       ctx.beginPath();
-      ctx.arc(p.x, p.y, POCKET_R, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, pr, 0, Math.PI * 2);
       ctx.fillStyle = '#020202';
       ctx.fill();
       // Pocket rim
@@ -398,12 +412,12 @@
       ctx.lineWidth = 1.5;
       ctx.stroke();
       // Radial shadow for depth
-      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, POCKET_R);
+      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, pr);
       grad.addColorStop(0,   'rgba(0,0,0,0.85)');
       grad.addColorStop(0.65,'rgba(0,0,0,0.35)');
       grad.addColorStop(1,   'rgba(0,0,0,0)');
       ctx.beginPath();
-      ctx.arc(p.x, p.y, POCKET_R, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, pr, 0, Math.PI * 2);
       ctx.fillStyle = grad;
       ctx.fill();
     }
