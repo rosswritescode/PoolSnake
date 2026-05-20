@@ -51,6 +51,10 @@
   let msgText, msgExpiry;
   let growPending = 0;
   let lastFrameTime = 0;
+  let comboCount = 0;
+  let lastPotTime = 0;
+  const COMBO_WINDOW = 5000;
+  const COMBO_MAX = 6;
 
   // ─── Canvas / layout globals ──────────────────────────────────────────────────
   let canvas, ctx, W, H;
@@ -143,16 +147,19 @@
       const startY  = apexY - (numBall - 1) * spacing / 2;
       for (let i = 0; i < numBall && n < count; i++) {
         list.push({
-          x:           rowX,
-          y:           startY + i * spacing,
-          vx:          0,
-          vy:          0,
-          radius:      BALL_R,
-          number:      n + 1,
-          stripe:      n >= 8,
-          color:       BALL_COLORS[n],
-          potted:      false,
-          hitCooldown: 0,
+          x:              rowX,
+          y:              startY + i * spacing,
+          vx:             0,
+          vy:             0,
+          radius:         BALL_R,
+          number:         n + 1,
+          stripe:         n >= 8,
+          color:          BALL_COLORS[n],
+          potted:         false,
+          hitCooldown:    0,
+          wallBounces:    0,
+          chainHot:       false,
+          chainHotExpiry: 0,
         });
         n++;
       }
@@ -182,10 +189,10 @@
       if (Math.sqrt(b.vx * b.vx + b.vy * b.vy) < 1.5) { b.vx = 0; b.vy = 0; }
 
       // Cushion bounces
-      if (b.x < minX) { b.x = minX; b.vx =  Math.abs(b.vx) * WALL_REST; }
-      if (b.x > maxX) { b.x = maxX; b.vx = -Math.abs(b.vx) * WALL_REST; }
-      if (b.y < minY) { b.y = minY; b.vy =  Math.abs(b.vy) * WALL_REST; }
-      if (b.y > maxY) { b.y = maxY; b.vy = -Math.abs(b.vy) * WALL_REST; }
+      if (b.x < minX) { b.x = minX; b.vx =  Math.abs(b.vx) * WALL_REST; b.wallBounces++; }
+      if (b.x > maxX) { b.x = maxX; b.vx = -Math.abs(b.vx) * WALL_REST; b.wallBounces++; }
+      if (b.y < minY) { b.y = minY; b.vy =  Math.abs(b.vy) * WALL_REST; b.wallBounces++; }
+      if (b.y > maxY) { b.y = maxY; b.vy = -Math.abs(b.vy) * WALL_REST; b.wallBounces++; }
 
       // Pocket detection
       for (const p of POCKETS) {
@@ -237,6 +244,19 @@
     const imp = dot * BALL_REST;
     a.vx -= imp * nx;  a.vy -= imp * ny;
     b.vx += imp * nx;  b.vy += imp * ny;
+
+    // Mark chain-hot: if one ball was freshly hit by the snake, the other is now "in play"
+    const CHAIN_HOT_MS = 3000;
+    const CHAIN_THRESHOLD = 60;
+    if (imp > CHAIN_THRESHOLD) {
+      const now = performance.now();
+      if (a.hitCooldown > HIT_COOLDOWN * 0.4 && !b.chainHot) {
+        b.chainHot = true; b.chainHotExpiry = now + CHAIN_HOT_MS;
+      }
+      if (b.hitCooldown > HIT_COOLDOWN * 0.4 && !a.chainHot) {
+        a.chainHot = true; a.chainHotExpiry = now + CHAIN_HOT_MS;
+      }
+    }
   }
 
   function potBall(ball) {
@@ -244,10 +264,36 @@
     ball.vx = 0;
     ball.vy = 0;
     pottedBalls.push({ ...ball });
-    score += 1;
+
+    // Combo multiplier
+    const now = performance.now();
+    if (comboCount > 0 && now - lastPotTime < COMBO_WINDOW) {
+      comboCount = Math.min(comboCount + 1, COMBO_MAX);
+    } else {
+      comboCount = 1;
+    }
+    lastPotTime = now;
+
+    let ballScore = comboCount;
+    let msg = comboCount > 1 ? 'COMBO \xD7' + comboCount + '!' : 'POT! +1';
+
+    // Bank shot bonus (+1 per cushion bounce, max +3)
+    const bankBonus = Math.min(ball.wallBounces, 3);
+    if (bankBonus > 0) {
+      ballScore += bankBonus;
+      msg = 'BANK \xD7' + ball.wallBounces + '! +' + ballScore;
+    }
+
+    // Chain reaction bonus (+2 if ball was knocked in by another ball)
+    if (ball.chainHot && now < ball.chainHotExpiry) {
+      ballScore += 2;
+      msg = 'CHAIN! +' + ballScore;
+    }
+
+    score += ballScore;
     growPending += 1;
     updateScoreUI();
-    showMsg('POT! +1');
+    showMsg(msg);
     if (pottedBalls.length === balls.length) completeRound();
   }
 
@@ -275,6 +321,8 @@
     lastRoundMultiplier = 0;
     elapsed          = 0;
     growPending      = 0;
+    comboCount       = 0;
+    lastPotTime      = 0;
     gameStartTime    = performance.now();
     lastStepTime     = performance.now();
     msgText          = '';
@@ -290,6 +338,8 @@
     pottedBalls = [];
     score       = 0;
     elapsed     = 0;
+    comboCount  = 0;
+    lastPotTime = 0;
     gameStartTime = performance.now();
     lastStepTime  = performance.now();
     msgText     = '';
@@ -358,7 +408,9 @@
         const cny = dist > 0.001 ? ddy / dist : dir.dy;
         b.vx += cnx * POWERS[settings.power];
         b.vy += cny * POWERS[settings.power];
-        b.hitCooldown = HIT_COOLDOWN;
+        b.hitCooldown    = HIT_COOLDOWN;
+        b.wallBounces    = 0;
+        b.chainHot       = false;
       }
     }
   }
@@ -494,22 +546,32 @@
 
   // ── Grid ───────────────────────────────────────────────────────────────────
   function drawGrid() {
+    const gridW = GRID_COLS * CELL_W;
+    const gridH = GRID_ROWS * CELL_W;
+
     ctx.strokeStyle = 'rgba(255,255,255,0.035)';
     ctx.lineWidth = 0.5;
     for (let c = 0; c <= GRID_COLS; c++) {
       const x = INNER_LEFT + c * CELL_W;
       ctx.beginPath();
       ctx.moveTo(x, INNER_TOP);
-      ctx.lineTo(x, INNER_TOP + GRID_ROWS * CELL_W);
+      ctx.lineTo(x, INNER_TOP + gridH);
       ctx.stroke();
     }
     for (let r = 0; r <= GRID_ROWS; r++) {
       const y = INNER_TOP + r * CELL_W;
       ctx.beginPath();
       ctx.moveTo(INNER_LEFT, y);
-      ctx.lineTo(INNER_LEFT + GRID_COLS * CELL_W, y);
+      ctx.lineTo(INNER_LEFT + gridW, y);
       ctx.stroke();
     }
+
+    // Visible boundary showing the snake's playfield
+    ctx.strokeStyle = 'rgba(0,255,65,0.28)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 6]);
+    ctx.strokeRect(INNER_LEFT, INNER_TOP, gridW, gridH);
+    ctx.setLineDash([]);
   }
 
   // ── Snake ──────────────────────────────────────────────────────────────────
@@ -623,6 +685,36 @@
       const rem = balls.length - pottedBalls.length;
       ctx.textAlign = 'right';
       ctx.fillText(rem + ' LEFT', TABLE_X + TABLE_W - 6, TABLE_Y + 5);
+
+      // Combo counter
+      if (comboCount > 1) {
+        const timeSincePot = performance.now() - lastPotTime;
+        const progress = Math.max(0, 1 - timeSincePot / COMBO_WINDOW);
+        const cx = TABLE_X + TABLE_W / 2;
+        const cy = TABLE_Y + sz * 1.6;
+        const arcR = sz * 1.1;
+
+        // Background arc track
+        ctx.beginPath();
+        ctx.arc(cx, cy, arcR, -Math.PI / 2, Math.PI * 1.5);
+        ctx.strokeStyle = 'rgba(255,215,0,0.18)';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+
+        // Progress arc
+        ctx.beginPath();
+        ctx.arc(cx, cy, arcR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
+        ctx.strokeStyle = '#ffd700';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffd700';
+        ctx.font = 'bold ' + sz + 'px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('\xD7' + comboCount, cx, cy);
+        ctx.textBaseline = 'top';
+      }
     }
 
     drawBonusTierHint(sz, ts);
