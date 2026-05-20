@@ -21,18 +21,18 @@
   ];
 
   // ─── Physics ─────────────────────────────────────────────────────────────────
-  const FRICTION_K   = 1.4;   // exponential speed decay coefficient (1/s)
-  const WALL_REST    = 0.62;  // wall restitution coefficient
-  const BALL_REST    = 0.90;  // ball–ball restitution coefficient
-  const HIT_STRENGTH = 580;   // px/s impulse on snake contact
-  const HIT_COOLDOWN = 380;   // ms before snake can re-hit same ball
-  const PHYS_ITERS   = 5;     // collision resolution passes per frame
-
+  const FRICTION_K   = 1.4;
+  const WALL_REST    = 0.62;
+  const BALL_REST    = 0.90;
+  const HIT_COOLDOWN = 380;
+  const PHYS_ITERS   = 5;
   const SPEEDS = { slow: 220, normal: 130, fast: 68 };
+  const POWERS = { low: 320, med: 580, high: 950, max: 1500 };
 
   // ─── Mutable settings (live-editable during play) ────────────────────────────
   const settings = {
     speed:       'normal',
+    power:       'med',
     ballCount:   10,
     timeLimits:  [20, 50, 70],
     multipliers: [6, 4, 2],
@@ -47,6 +47,7 @@
   let lastStepTime;
   let msgText, msgExpiry;
   let finalMultiplier, finalScore;
+  let growPending = 0;
   let lastFrameTime = 0;
 
   // ─── Canvas / layout globals ──────────────────────────────────────────────────
@@ -233,6 +234,7 @@
     ball.vy = 0;
     pottedBalls.push({ ...ball });
     score += 1;
+    growPending += 1;
     updateScoreUI();
     showMsg('POT! +1');
     if (pottedBalls.length === balls.length) endGame(true);
@@ -255,6 +257,7 @@
     pottedBalls     = [];
     score           = 0;
     elapsed         = 0;
+    growPending     = 0;
     gameStartTime   = performance.now();
     lastStepTime    = performance.now();
     msgText         = '';
@@ -272,19 +275,23 @@
     const nx   = head.x + dir.dx;
     const ny   = head.y + dir.dy;
 
-    if (nx < 0 || nx >= GRID_COLS || ny < 0 || ny >= GRID_ROWS) {
-      endGame(false);
-      return;
-    }
+    // Wrap around walls
+    const wx = (nx + GRID_COLS) % GRID_COLS;
+    const wy = (ny + GRID_ROWS) % GRID_ROWS;
+
     for (let i = 0; i < snake.length - 1; i++) {
-      if (snake[i].x === nx && snake[i].y === ny) {
+      if (snake[i].x === wx && snake[i].y === wy) {
         endGame(false);
         return;
       }
     }
 
-    snake.unshift({ x: nx, y: ny });
-    snake.pop();
+    snake.unshift({ x: wx, y: wy });
+    if (growPending > 0) {
+      growPending--;
+    } else {
+      snake.pop();
+    }
 
     // Hit any ball that overlaps the new head cell
     const { x: hx, y: hy } = cellToPixel(nx, ny);
@@ -293,8 +300,8 @@
       const ddx = hx - b.x;
       const ddy = hy - b.y;
       if (Math.sqrt(ddx * ddx + ddy * ddy) < b.radius + CELL_W * 0.5) {
-        b.vx += dir.dx * HIT_STRENGTH;
-        b.vy += dir.dy * HIT_STRENGTH;
+        b.vx += dir.dx * POWERS[settings.power];
+        b.vy += dir.dy * POWERS[settings.power];
         b.hitCooldown = HIT_COOLDOWN;
       }
     }
@@ -772,6 +779,13 @@
       btn.addEventListener('click', () => {
         settings.speed = btn.dataset.value;
         document.querySelectorAll('[data-setting="speed"]').forEach(b =>
+          b.classList.toggle('setting-btn--active', b === btn));
+      });
+    });
+    document.querySelectorAll('[data-setting="power"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        settings.power = btn.dataset.value;
+        document.querySelectorAll('[data-setting="power"]').forEach(b =>
           b.classList.toggle('setting-btn--active', b === btn));
       });
     });
