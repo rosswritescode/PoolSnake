@@ -86,8 +86,8 @@
 
     // Corner pockets: same visual but larger detection zone.
     // Mid pockets: visually bigger, directional-only potting (ball must be heading in).
-    const midDrawR = POCKET_R * 1.30;
-    const midPotR  = POCKET_R * 1.30;
+    const midDrawR = POCKET_R;          // same visual size as corners
+    const midPotR  = POCKET_R * 1.30;  // detection zone stays generous
     const crnPotR  = POCKET_R * 1.50; // generous invisible catch zone
 
     POCKETS = [
@@ -247,7 +247,6 @@
     ball.vy = 0;
     pottedBalls.push({ ...ball });
     score += 1;
-    growPending += 1;
     updateScoreUI();
     showMsg('POT! +1');
     if (pottedBalls.length === balls.length) endGame(true);
@@ -270,7 +269,6 @@
     pottedBalls     = [];
     score           = 0;
     elapsed         = 0;
-    growPending     = 0;
     gameStartTime   = performance.now();
     lastStepTime    = performance.now();
     msgText         = '';
@@ -279,6 +277,18 @@
     finalScore      = 0;
     gameState       = 'playing';
     updateScoreUI();
+  }
+
+  function resetSnake() {
+    const midRow = Math.floor(GRID_ROWS / 2);
+    snake = [
+      { x: 2, y: midRow },
+      { x: 1, y: midRow },
+      { x: 0, y: midRow },
+    ];
+    dir     = { dx: 1, dy: 0 };
+    nextDir = null;
+    showMsg('OOPS!');
   }
 
   function snakeStep() {
@@ -294,17 +304,13 @@
 
     for (let i = 0; i < snake.length - 1; i++) {
       if (snake[i].x === wx && snake[i].y === wy) {
-        endGame(false);
+        resetSnake();
         return;
       }
     }
 
     snake.unshift({ x: wx, y: wy });
-    if (growPending > 0) {
-      growPending--;
-    } else {
-      snake.pop();
-    }
+    snake.pop(); // constant length
 
     // Hit any ball that overlaps the new head cell
     const { x: hx, y: hy } = cellToPixel(wx, wy);
@@ -399,27 +405,44 @@
     ctx.lineWidth = 1.5;
     ctx.strokeRect(TABLE_X, TABLE_Y, TABLE_W, TABLE_H);
 
-    // Pockets
+    // Pockets — recessed socket look
     for (const p of POCKETS) {
       const pr = p.drawR;
-      // Black hole
+
+      // Dark socket surround (the cut-out in the cushion rail)
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, pr * 1.22, 0, Math.PI * 2);
+      ctx.fillStyle = '#080808';
+      ctx.fill();
+
+      // Pocket leather/rubber ring between socket and hole
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, pr * 1.10, 0, Math.PI * 2);
+      ctx.fillStyle = '#1a1008';
+      ctx.fill();
+
+      // The hole itself
       ctx.beginPath();
       ctx.arc(p.x, p.y, pr, 0, Math.PI * 2);
       ctx.fillStyle = '#020202';
       ctx.fill();
-      // Pocket rim
-      ctx.strokeStyle = 'rgba(255,255,255,0.16)';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      // Radial shadow for depth
-      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, pr);
-      grad.addColorStop(0,   'rgba(0,0,0,0.85)');
-      grad.addColorStop(0.65,'rgba(0,0,0,0.35)');
+
+      // Depth gradient — dark centre fades to nothing at rim (concave illusion)
+      const grad = ctx.createRadialGradient(p.x, p.y, pr * 0.2, p.x, p.y, pr);
+      grad.addColorStop(0,   'rgba(0,0,0,0.92)');
+      grad.addColorStop(0.7, 'rgba(0,0,0,0.45)');
       grad.addColorStop(1,   'rgba(0,0,0,0)');
       ctx.beginPath();
       ctx.arc(p.x, p.y, pr, 0, Math.PI * 2);
       ctx.fillStyle = grad;
       ctx.fill();
+
+      // Lit rim arc (upper-left catchlight simulates curved lip)
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, pr, Math.PI * 1.08, Math.PI * 1.72);
+      ctx.strokeStyle = 'rgba(255,240,180,0.22)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
     }
 
     // Potted strip background
