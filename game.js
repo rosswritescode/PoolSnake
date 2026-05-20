@@ -294,14 +294,18 @@
     }
 
     // Hit any ball that overlaps the new head cell
-    const { x: hx, y: hy } = cellToPixel(nx, ny);
+    const { x: hx, y: hy } = cellToPixel(wx, wy);
     for (const b of balls) {
       if (b.potted || b.hitCooldown > 0) continue;
-      const ddx = hx - b.x;
-      const ddy = hy - b.y;
-      if (Math.sqrt(ddx * ddx + ddy * ddy) < b.radius + CELL_W * 0.5) {
-        b.vx += dir.dx * POWERS[settings.power];
-        b.vy += dir.dy * POWERS[settings.power];
+      const ddx = b.x - hx;
+      const ddy = b.y - hy;
+      const dist = Math.sqrt(ddx * ddx + ddy * ddy);
+      if (dist < b.radius + CELL_W * 0.5) {
+        // Push along collision normal (head→ball centre) so side hits go sideways
+        const nx = dist > 0.001 ? ddx / dist : dir.dx;
+        const ny = dist > 0.001 ? ddy / dist : dir.dy;
+        b.vx += nx * POWERS[settings.power];
+        b.vy += ny * POWERS[settings.power];
         b.hitCooldown = HIT_COOLDOWN;
       }
     }
