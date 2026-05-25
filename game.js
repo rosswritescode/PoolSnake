@@ -62,7 +62,7 @@
   let POTTED_H;
   let POCKET_R, POCKETS;
   let INNER_LEFT, INNER_TOP, INNER_W, INNER_H;
-  let CELL_W, GRID_COLS, GRID_ROWS;
+  let CELL_W, GRID_COLS, GRID_ROWS, GRID_TOP;
   let BALL_R;
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -114,14 +114,15 @@
 
     GRID_COLS = 18;
     CELL_W    = INNER_W / GRID_COLS;
-    GRID_ROWS = Math.max(1, Math.floor(INNER_H / CELL_W));
+    GRID_ROWS = Math.max(1, Math.floor(INNER_H / CELL_W)) + 1;
+    GRID_TOP  = INNER_TOP + (INNER_H - GRID_ROWS * CELL_W) / 2;
     BALL_R    = CELL_W * 0.74;
   }
 
   function cellToPixel(gx, gy) {
     return {
       x: INNER_LEFT + (gx + 0.5) * CELL_W,
-      y: INNER_TOP  + (gy + 0.5) * CELL_W,
+      y: GRID_TOP   + (gy + 0.5) * CELL_W,
     };
   }
 
@@ -554,12 +555,12 @@
     for (let c = 0; c <= GRID_COLS; c++) {
       const x = INNER_LEFT + c * CELL_W;
       ctx.beginPath();
-      ctx.moveTo(x, INNER_TOP);
-      ctx.lineTo(x, INNER_TOP + gridH);
+      ctx.moveTo(x, GRID_TOP);
+      ctx.lineTo(x, GRID_TOP + gridH);
       ctx.stroke();
     }
     for (let r = 0; r <= GRID_ROWS; r++) {
-      const y = INNER_TOP + r * CELL_W;
+      const y = GRID_TOP + r * CELL_W;
       ctx.beginPath();
       ctx.moveTo(INNER_LEFT, y);
       ctx.lineTo(INNER_LEFT + gridW, y);
@@ -570,7 +571,7 @@
     ctx.strokeStyle = 'rgba(0,255,65,0.28)';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 6]);
-    ctx.strokeRect(INNER_LEFT, INNER_TOP, gridW, gridH);
+    ctx.strokeRect(INNER_LEFT, GRID_TOP, gridW, gridH);
     ctx.setLineDash([]);
   }
 
