@@ -36,6 +36,7 @@
     ballCount:   10,
     timeLimits:  [20, 50, 70],
     multipliers: [6, 4, 2],
+    snapToGrid:  true,
   };
 
   // ─── Game state ───────────────────────────────────────────────────────────────
@@ -160,6 +161,7 @@
           hitCooldown:    0,
           wallBounces:    0,
           chainHot:       false,
+          hasMoved:       false,
           chainHotExpiry: 0,
         });
         n++;
@@ -188,6 +190,14 @@
       b.vy *= decay;
 
       if (Math.sqrt(b.vx * b.vx + b.vy * b.vy) < 1.5) { b.vx = 0; b.vy = 0; }
+
+      // Snap-to-grid: gently pull stopped balls to nearest cell centre
+      if (settings.snapToGrid && b.hasMoved && b.vx === 0 && b.vy === 0) {
+        const col = Math.max(0, Math.min(GRID_COLS - 1, Math.floor((b.x - INNER_LEFT) / CELL_W)));
+        const row = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor((b.y - GRID_TOP)   / CELL_W)));
+        b.x += (INNER_LEFT + (col + 0.5) * CELL_W - b.x) * 0.15;
+        b.y += (GRID_TOP   + (row + 0.5) * CELL_W - b.y) * 0.15;
+      }
 
       // Cushion bounces
       if (b.x < minX) { b.x = minX; b.vx =  Math.abs(b.vx) * WALL_REST; b.wallBounces++; }
@@ -412,6 +422,7 @@
         b.hitCooldown    = HIT_COOLDOWN;
         b.wallBounces    = 0;
         b.chainHot       = false;
+        b.hasMoved       = true;
       }
     }
   }
@@ -949,6 +960,14 @@
       btn.addEventListener('click', () => {
         settings.power = btn.dataset.value;
         document.querySelectorAll('[data-setting="power"]').forEach(b =>
+          b.classList.toggle('setting-btn--active', b === btn));
+      });
+    });
+
+    document.querySelectorAll('[data-setting="snapToGrid"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        settings.snapToGrid = btn.dataset.value === 'on';
+        document.querySelectorAll('[data-setting="snapToGrid"]').forEach(b =>
           b.classList.toggle('setting-btn--active', b === btn));
       });
     });
