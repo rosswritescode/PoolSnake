@@ -56,6 +56,9 @@
   let lastPotTime = 0;
   const COMBO_WINDOW = 5000;
   const COMBO_MAX = 6;
+  let lastBallDeadline = 0;          // 0 = countdown inactive
+  const LAST_BALL_MS = 5000;
+  const CLEAR_BONUS  = 10;
 
   // ─── Canvas / layout globals ──────────────────────────────────────────────────
   let canvas, ctx, W, H;
@@ -162,6 +165,7 @@
           wallBounces:    0,
           chainHot:       false,
           hasMoved:       false,
+          roll:           0,
           chainHotExpiry: 0,
         });
         n++;
@@ -186,6 +190,8 @@
 
       b.x += b.vx * dtS;
       b.y += b.vy * dtS;
+      // Spin the ball face in proportion to distance travelled
+      b.roll += (b.vx + b.vy) * dtS / (BALL_R * 1.6);
       b.vx *= decay;
       b.vy *= decay;
 
@@ -303,9 +309,25 @@
 
     score += ballScore;
     growPending += 1;
+
+    const remaining = balls.length - pottedBalls.length;
+    if (remaining === 0) {
+      // Cleared the whole table — bonus if done within the last-ball countdown
+      if (lastBallDeadline === 0 || now <= lastBallDeadline) {
+        score += CLEAR_BONUS;
+        msg = 'TABLE CLEAR! +' + CLEAR_BONUS;
+      }
+      updateScoreUI();
+      showMsg(msg);
+      completeRound();
+      return;
+    }
+    if (remaining === 1 && lastBallDeadline === 0) {
+      lastBallDeadline = now + LAST_BALL_MS;
+      msg = 'LAST BALL! 5s';
+    }
     updateScoreUI();
     showMsg(msg);
-    if (pottedBalls.length === balls.length) completeRound();
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -334,6 +356,7 @@
     growPending      = 0;
     comboCount       = 0;
     lastPotTime      = 0;
+    lastBallDeadline = 0;
     gameStartTime    = performance.now();
     lastStepTime     = performance.now();
     msgText          = '';
@@ -351,6 +374,7 @@
     elapsed     = 0;
     comboCount  = 0;
     lastPotTime = 0;
+    lastBallDeadline = 0;
     gameStartTime = performance.now();
     lastStepTime  = performance.now();
     msgText     = '';
@@ -443,6 +467,7 @@
     else                    lastRoundMultiplier = 1;
     lastRoundScore = Math.round(score * lastRoundMultiplier);
     totalScore    += lastRoundScore;
+    lastBallDeadline = 0;
     completedRounds++;
     saveBest();
     gameState = 'round_clear';
@@ -606,11 +631,11 @@
   // ── Balls ──────────────────────────────────────────────────────────────────
   function drawBalls() {
     for (const b of balls) {
-      if (!b.potted) drawOneBall(b.x, b.y, b.color, b.number, b.stripe, 1);
+      if (!b.potted) drawOneBall(b.x, b.y, b.color, b.number, b.stripe, 1, b.roll);
     }
   }
 
-  function drawOneBall(x, y, color, number, stripe, alpha) {
+  function drawOneBall(x, y, color, number, stripe, alpha, roll) {
     const r = BALL_R;
     ctx.globalAlpha = alpha;
     ctx.shadowColor = color;
@@ -620,30 +645,36 @@
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fillStyle = stripe ? '#f0f0f0' : color;
     ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Stripe + number rotate with the ball's roll; highlight stays fixed
+    ctx.save();
+    ctx.translate(x, y);
+    if (roll) ctx.rotate(roll);
 
     if (stripe) {
       ctx.save();
       ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
       ctx.clip();
       ctx.fillStyle = color;
-      ctx.fillRect(x - r, y - r * 0.42, r * 2, r * 0.84);
+      ctx.fillRect(-r, -r * 0.42, r * 2, r * 0.84);
       ctx.restore();
     }
 
-    ctx.shadowBlur = 0;
-
     if (r > 9) {
       ctx.beginPath();
-      ctx.arc(x, y, r * 0.4, 0, Math.PI * 2);
+      ctx.arc(0, 0, r * 0.4, 0, Math.PI * 2);
       ctx.fillStyle = '#ffffff';
       ctx.fill();
       ctx.fillStyle = '#111111';
       ctx.font = 'bold ' + Math.max(7, Math.floor(r * 0.52)) + 'px sans-serif';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(number, x, y + r * 0.04);
+      ctx.fillText(number, 0, r * 0.04);
     }
+
+    ctx.restore();
 
     ctx.beginPath();
     ctx.arc(x - r * 0.28, y - r * 0.28, r * 0.19, 0, Math.PI * 2);
@@ -697,6 +728,24 @@
       const rem = balls.length - pottedBalls.length;
       ctx.textAlign = 'right';
       ctx.fillText(rem + ' LEFT', TABLE_X + TABLE_W - 6, TABLE_Y + 5);
+
+      // Last-ball countdown — big pulsing timer mid-table
+      if (lastBallDeadline > 0) {
+        const remMs = Math.max(0, lastBallDeadline - performance.now());
+        const secs  = (remMs / 1000).toFixed(1);
+        const pulse = 1 + 0.08 * Math.sin(ts / 90);
+        ctx.globalAlpha  = 0.85;
+        ctx.fillStyle    = remMs < 2000 ? '#ff5252' : '#ffd700';
+        ctx.shadowColor  = ctx.fillStyle;
+        ctx.shadowBlur   = 16;
+        ctx.font         = 'bold ' + Math.floor(sz * 2.4 * pulse) + 'px "Press Start 2P", monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(secs, TABLE_X + TABLE_W / 2, TABLE_Y + TABLE_H * 0.5);
+        ctx.shadowBlur   = 0;
+        ctx.globalAlpha  = 1;
+        ctx.textBaseline = 'top';
+      }
 
       // Combo counter
       if (comboCount > 1) {
@@ -908,6 +957,11 @@
       if (ts - lastStepTime >= SPEEDS[settings.speed]) {
         lastStepTime = ts;
         snakeStep();
+      }
+      // Last-ball countdown ran out — round ends anyway, no clear bonus
+      if (lastBallDeadline > 0 && performance.now() > lastBallDeadline) {
+        showMsg("TIME'S UP!");
+        completeRound();
       }
     }
 
