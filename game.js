@@ -26,8 +26,9 @@
   const BALL_REST    = 0.90;
   const HIT_COOLDOWN = 380;
   const PHYS_ITERS   = 5;
-  const SPEEDS = { slow: 220, normal: 130, fast: 68 };
-  const POWERS = { low: 320, med: 580, high: 950, max: 1500 };
+  const SPEEDS    = { slow: 220, normal: 130, fast: 68 };
+  const POWERS    = { low: 320, med: 580, high: 950, max: 1500 };
+  const FRICTIONS = { low: 0.45, med: 0.85, high: 1.4 };
 
   // ─── Mutable settings (live-editable during play) ────────────────────────────
   const settings = {
@@ -37,6 +38,7 @@
     timeLimits:  [20, 50, 70],
     multipliers: [6, 4, 2],
     snapToGrid:  true,
+    friction:    'med',
   };
 
   // ─── Game state ───────────────────────────────────────────────────────────────
@@ -212,7 +214,7 @@
   // ─────────────────────────────────────────────────────────────────────────────
   function physicsStep(dt) {
     const dtS   = dt / 1000;
-    const decay = Math.exp(-FRICTION_K * dtS);
+    const decay = Math.exp(-FRICTIONS[settings.friction] * dtS);
     const minX  = TABLE_X + BALL_R;
     const maxX  = TABLE_X + TABLE_W - BALL_R;
     const minY  = TABLE_Y + BALL_R;
@@ -1070,6 +1072,14 @@
       btn.addEventListener('click', () => {
         settings.power = btn.dataset.value;
         document.querySelectorAll('[data-setting="power"]').forEach(b =>
+          b.classList.toggle('setting-btn--active', b === btn));
+      });
+    });
+
+    document.querySelectorAll('[data-setting="friction"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        settings.friction = btn.dataset.value;
+        document.querySelectorAll('[data-setting="friction"]').forEach(b =>
           b.classList.toggle('setting-btn--active', b === btn));
       });
     });
