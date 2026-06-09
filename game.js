@@ -131,6 +131,39 @@
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
+  // Ball orientation (3D rolling)
+  // Each ball tracks two unit vectors on its sphere: p = number-disc position,
+  // a = stripe axis. Rolling rotates them about the axis perpendicular to motion.
+  // ─────────────────────────────────────────────────────────────────────────────
+  function makeDecal() {
+    const d = { px: 0, py: 0, pz: 1, ax: 0, ay: 1, az: 0 };
+    // Slight random orientation so the rack doesn't look stamped out
+    const ang = Math.random() * Math.PI * 2;
+    rotateDecal(d, Math.cos(ang), Math.sin(ang), Math.random() * 0.9);
+    return d;
+  }
+
+  // Rodrigues rotation of both decal vectors about horizontal unit axis (ux, uy, 0)
+  function rotateDecal(d, ux, uy, th) {
+    const c = Math.cos(th), s = Math.sin(th);
+    const rot = (x, y, z) => {
+      const dot = ux * x + uy * y;
+      return [
+        x * c + uy * z * s + ux * dot * (1 - c),
+        y * c - ux * z * s + uy * dot * (1 - c),
+        z * c + (ux * y - uy * x) * s,
+      ];
+    };
+    [d.px, d.py, d.pz] = rot(d.px, d.py, d.pz);
+    [d.ax, d.ay, d.az] = rot(d.ax, d.ay, d.az);
+    // Renormalise to stop floating-point drift
+    const pl = Math.hypot(d.px, d.py, d.pz) || 1;
+    const al = Math.hypot(d.ax, d.ay, d.az) || 1;
+    d.px /= pl; d.py /= pl; d.pz /= pl;
+    d.ax /= al; d.ay /= al; d.az /= al;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
   // Triangle rack builder
   // ─────────────────────────────────────────────────────────────────────────────
   function createTriangle(count) {
@@ -165,7 +198,7 @@
           wallBounces:    0,
           chainHot:       false,
           hasMoved:       false,
-          roll:           0,
+          decal:          makeDecal(),
           chainHotExpiry: 0,
         });
         n++;
@@ -190,8 +223,11 @@
 
       b.x += b.vx * dtS;
       b.y += b.vy * dtS;
-      // Spin the ball face in proportion to distance travelled
-      b.roll += (b.vx + b.vy) * dtS / (BALL_R * 1.6);
+      // Roll the sphere about the axis perpendicular to its motion
+      const sp = Math.hypot(b.vx, b.vy);
+      if (sp > 0.5) {
+        rotateDecal(b.decal, -b.vy / sp, b.vx / sp, sp * dtS / BALL_R);
+      }
       b.vx *= decay;
       b.vy *= decay;
 
@@ -631,12 +667,15 @@
   // ── Balls ──────────────────────────────────────────────────────────────────
   function drawBalls() {
     for (const b of balls) {
-      if (!b.potted) drawOneBall(b.x, b.y, b.color, b.number, b.stripe, 1, b.roll);
+      if (!b.potted) drawOneBall(b.x, b.y, b.color, b.number, b.stripe, 1, b.decal);
     }
   }
 
-  function drawOneBall(x, y, color, number, stripe, alpha, roll) {
+  const FRONT_DECAL = { px: 0, py: 0, pz: 1, ax: 0, ay: 1, az: 0 };
+
+  function drawOneBall(x, y, color, number, stripe, alpha, decal) {
     const r = BALL_R;
+    const d = decal || FRONT_DECAL;
     ctx.globalAlpha = alpha;
     ctx.shadowColor = color;
     ctx.shadowBlur  = 9;
@@ -647,31 +686,48 @@
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    // Stripe + number rotate with the ball's roll; highlight stays fixed
+    // Decals projected orthographically onto the visible hemisphere
     ctx.save();
     ctx.translate(x, y);
-    if (roll) ctx.rotate(roll);
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.clip();
 
     if (stripe) {
-      ctx.save();
+      // The stripe's great circle projects to an ellipse: full circle when the
+      // stripe axis faces the viewer (band at the rim), a line when edge-on.
+      const az  = Math.abs(d.az);
+      const rot = Math.atan2(d.ay, d.ax) + Math.PI / 2;
       ctx.beginPath();
-      ctx.arc(0, 0, r, 0, Math.PI * 2);
-      ctx.clip();
-      ctx.fillStyle = color;
-      ctx.fillRect(-r, -r * 0.42, r * 2, r * 0.84);
-      ctx.restore();
+      ctx.ellipse(0, 0, r, Math.max(0.001, r * az), rot, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth   = r * 0.66;
+      ctx.stroke();
     }
 
+    // Number disc at both poles (like a real ball), foreshortened toward the rim
     if (r > 9) {
-      ctx.beginPath();
-      ctx.arc(0, 0, r * 0.4, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffffff';
-      ctx.fill();
-      ctx.fillStyle = '#111111';
-      ctx.font = 'bold ' + Math.max(7, Math.floor(r * 0.52)) + 'px sans-serif';
-      ctx.textAlign    = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(number, 0, r * 0.04);
+      for (const sgn of [1, -1]) {
+        const z = d.pz * sgn;
+        if (z < 0.18) continue;
+        const cxp  = d.px * sgn * r;
+        const cyp  = d.py * sgn * r;
+        const rd   = r * 0.42;
+        const rotD = Math.atan2(d.py * sgn, d.px * sgn);
+        ctx.beginPath();
+        ctx.ellipse(cxp, cyp, rd * z, rd, rotD, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        if (z > 0.55) {
+          ctx.globalAlpha = alpha * Math.min(1, (z - 0.55) / 0.25);
+          ctx.fillStyle = '#111111';
+          ctx.font = 'bold ' + Math.max(7, Math.floor(r * 0.52 * z)) + 'px sans-serif';
+          ctx.textAlign    = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(number, cxp, cyp + r * 0.04 * z);
+          ctx.globalAlpha = alpha;
+        }
+      }
     }
 
     ctx.restore();
