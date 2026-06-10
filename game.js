@@ -37,7 +37,7 @@
     ballCount:   10,
     timeLimits:  [20, 50, 70],
     multipliers: [6, 4, 2],
-    snapToGrid:  true,
+    snapToGrid:  false,
     friction:    'med',
   };
 
