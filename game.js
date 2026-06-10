@@ -37,20 +37,19 @@
     ballCount:   10,
     timeLimits:  [20, 50, 70],
     multipliers: [6, 4, 2],
-    snapToGrid:  false,
     friction:    'med',
   };
 
   // ─── Game state ───────────────────────────────────────────────────────────────
   // 'start' | 'playing' | 'round_clear' | 'gameover'
   let gameState = 'start';
-  let snake, dir, nextDir;
+  // Continuous snake: trail of corner points (head first), body sampled along it
+  let trail, snakeLen, dir, turnQueue, distSinceTurn;
   let balls, pottedBalls;
   let score, bestScore, totalScore;
   let roundNumber, completedRounds;
   let lastRoundScore, lastRoundMultiplier;
   let gameStartTime, elapsed;
-  let lastStepTime;
   let msgText, msgExpiry;
   let growPending = 0;
   let lastFrameTime = 0;
@@ -69,6 +68,7 @@
   let POCKET_R, POCKETS;
   let INNER_LEFT, INNER_TOP, INNER_W, INNER_H;
   let CELL_W, GRID_COLS, GRID_ROWS, GRID_TOP;
+  let SEG_SPACING, PLAY_L, PLAY_R, PLAY_T, PLAY_B;
   let BALL_R;
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -123,13 +123,13 @@
     GRID_ROWS = Math.max(1, Math.floor(INNER_H / CELL_W)) + 1;
     GRID_TOP  = INNER_TOP + (INNER_H - GRID_ROWS * CELL_W) / 2;
     BALL_R    = CELL_W * 0.74;
-  }
 
-  function cellToPixel(gx, gy) {
-    return {
-      x: INNER_LEFT + (gx + 0.5) * CELL_W,
-      y: GRID_TOP   + (gy + 0.5) * CELL_W,
-    };
+    // Snake playfield bounds (continuous movement) and body segment spacing
+    SEG_SPACING = CELL_W * 0.82;
+    PLAY_L = INNER_LEFT;
+    PLAY_R = INNER_LEFT + GRID_COLS * CELL_W;
+    PLAY_T = GRID_TOP;
+    PLAY_B = GRID_TOP + GRID_ROWS * CELL_W;
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -199,7 +199,6 @@
           hitCooldown:    0,
           wallBounces:    0,
           chainHot:       false,
-          hasMoved:       false,
           decal:          makeDecal(),
           chainHotExpiry: 0,
         });
@@ -234,14 +233,6 @@
       b.vy *= decay;
 
       if (Math.sqrt(b.vx * b.vx + b.vy * b.vy) < 1.5) { b.vx = 0; b.vy = 0; }
-
-      // Snap-to-grid: gently pull stopped balls to nearest cell centre
-      if (settings.snapToGrid && b.hasMoved && b.vx === 0 && b.vy === 0) {
-        const col = Math.max(0, Math.min(GRID_COLS - 1, Math.floor((b.x - INNER_LEFT) / CELL_W)));
-        const row = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor((b.y - GRID_TOP)   / CELL_W)));
-        b.x += (INNER_LEFT + (col + 0.5) * CELL_W - b.x) * 0.15;
-        b.y += (GRID_TOP   + (row + 0.5) * CELL_W - b.y) * 0.15;
-      }
 
       // Cushion bounces
       if (b.x < minX) { b.x = minX; b.vx =  Math.abs(b.vx) * WALL_REST; b.wallBounces++; }
@@ -372,15 +363,14 @@
   // Snake
   // ─────────────────────────────────────────────────────────────────────────────
   function initGame() {
-    // Full reset — snake back to 3 segments
-    const midRow = Math.floor(GRID_ROWS / 2);
-    snake = [
-      { x: 2, y: midRow },
-      { x: 1, y: midRow },
-      { x: 0, y: midRow },
-    ];
-    dir     = { dx: 1, dy: 0 };
-    nextDir = null;
+    // Full reset — snake back to 3 segments, mid-left moving right
+    const startY = GRID_TOP + (Math.floor(GRID_ROWS / 2) + 0.5) * CELL_W;
+    const startX = PLAY_L + CELL_W * 3;
+    trail         = [{ x: startX, y: startY }, { x: PLAY_L, y: startY }];
+    snakeLen      = 3;
+    dir           = { dx: 1, dy: 0 };
+    turnQueue     = [];
+    distSinceTurn = 1e9;
 
     balls            = createTriangle(settings.ballCount);
     pottedBalls      = [];
@@ -396,7 +386,6 @@
     lastPotTime      = 0;
     lastBallDeadline = 0;
     gameStartTime    = performance.now();
-    lastStepTime     = performance.now();
     msgText          = '';
     msgExpiry        = 0;
     gameState        = 'playing';
@@ -414,7 +403,6 @@
     lastPotTime = 0;
     lastBallDeadline = 0;
     gameStartTime = performance.now();
-    lastStepTime  = performance.now();
     msgText     = '';
     msgExpiry   = 0;
     gameState   = 'playing';
@@ -442,56 +430,142 @@
     }
   }
 
-  function snakeStep() {
-    if (nextDir) { dir = nextDir; nextDir = null; }
+  // Sample a point on the trail at the given distance behind the head.
+  // trail[i].jump marks the segment trail[i]→trail[i+1] as a wrap teleport.
+  function trailPointAt(d) {
+    let acc = 0;
+    for (let i = 0; i < trail.length - 1; i++) {
+      const a = trail[i], b = trail[i + 1];
+      if (a.jump) continue;
+      const len = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+      if (len > 0 && acc + len >= d) {
+        const t = (d - acc) / len;
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+      }
+      acc += len;
+    }
+    const last = trail[trail.length - 1];
+    return { x: last.x, y: last.y };
+  }
 
-    const head = snake[0];
-    const nx   = head.x + dir.dx;
-    const ny   = head.y + dir.dy;
+  function wrapHead() {
+    const head = trail[0];
+    if (head.x < PLAY_L) {
+      const over = PLAY_L - head.x;
+      trail.splice(1, 0, { x: PLAY_R, y: head.y, jump: true }, { x: PLAY_L, y: head.y });
+      head.x = PLAY_R - over;
+    } else if (head.x > PLAY_R) {
+      const over = head.x - PLAY_R;
+      trail.splice(1, 0, { x: PLAY_L, y: head.y, jump: true }, { x: PLAY_R, y: head.y });
+      head.x = PLAY_L + over;
+    } else if (head.y < PLAY_T) {
+      const over = PLAY_T - head.y;
+      trail.splice(1, 0, { x: head.x, y: PLAY_B, jump: true }, { x: head.x, y: PLAY_T });
+      head.y = PLAY_B - over;
+    } else if (head.y > PLAY_B) {
+      const over = head.y - PLAY_B;
+      trail.splice(1, 0, { x: head.x, y: PLAY_T, jump: true }, { x: head.x, y: PLAY_B });
+      head.y = PLAY_T + over;
+    }
+  }
 
-    // Wrap around walls
-    const wx = (nx + GRID_COLS) % GRID_COLS;
-    const wy = (ny + GRID_ROWS) % GRID_ROWS;
+  function distPointSeg(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq > 0 ? ((px - ax) * dx + (py - ay) * dy) / lenSq : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+  }
 
-    // Self-collision → game over
-    for (let i = 0; i < snake.length - 1; i++) {
-      if (snake[i].x === wx && snake[i].y === wy) {
+  function snakeUpdate(dt) {
+    snakeLen += growPending;
+    growPending = 0;
+
+    const head    = trail[0];
+    const pxSpeed = CELL_W * 1000 / SPEEDS[settings.speed];
+    const minTurn = CELL_W * 0.9;   // travel required between turns (prevents instant fold-back)
+    let   remain  = pxSpeed * dt / 1000;
+
+    while (remain > 0) {
+      let step = remain;
+      if (turnQueue.length && distSinceTurn < minTurn) {
+        step = Math.min(step, minTurn - distSinceTurn);
+      }
+      head.x += dir.dx * step;
+      head.y += dir.dy * step;
+      distSinceTurn += step;
+      remain -= step;
+      wrapHead();
+
+      if (turnQueue.length && distSinceTurn >= minTurn) {
+        const t = turnQueue.shift();
+        if (!(t.dx === -dir.dx && t.dy === -dir.dy) &&
+            !(t.dx ===  dir.dx && t.dy ===  dir.dy)) {
+          trail.splice(1, 0, { x: head.x, y: head.y });   // corner
+          dir = { dx: t.dx, dy: t.dy };
+          distSinceTurn = 0;
+        }
+      }
+    }
+
+    // Trim trail past the snake's tail
+    const need = snakeLen * SEG_SPACING + CELL_W * 2;
+    let acc = 0;
+    for (let i = 0; i < trail.length - 1; i++) {
+      if (trail[i].jump) continue;
+      acc += Math.abs(trail[i].x - trail[i + 1].x) + Math.abs(trail[i].y - trail[i + 1].y);
+      if (acc > need) { trail.length = i + 2; break; }
+    }
+
+    // Self-collision: head vs body beyond the neck → game over
+    const hitR = CELL_W * 0.40;
+    const neck = CELL_W * 1.6;
+    const maxD = snakeLen * SEG_SPACING;
+    acc = 0;
+    for (let i = 0; i < trail.length - 1 && acc < maxD; i++) {
+      const a = trail[i], b = trail[i + 1];
+      if (a.jump) continue;
+      const len = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+      const segStart = acc;
+      acc += len;
+      if (acc <= neck || len === 0) continue;
+      let ax = a.x, ay = a.y;
+      if (segStart < neck) {
+        const t = (neck - segStart) / len;
+        ax = a.x + (b.x - a.x) * t;
+        ay = a.y + (b.y - a.y) * t;
+      }
+      if (distPointSeg(head.x, head.y, ax, ay, b.x, b.y) < hitR) {
         endGame();
         return;
       }
     }
 
-    snake.unshift({ x: wx, y: wy });
-    if (growPending > 0) {
-      growPending--;
-    } else {
-      snake.pop();
-    }
-
-    // Hit any ball that overlaps the new head cell
-    const { x: hx, y: hy } = cellToPixel(wx, wy);
+    // Hit any ball overlapping the head
     for (const b of balls) {
       if (b.potted || b.hitCooldown > 0) continue;
-      const ddx = b.x - hx;
-      const ddy = b.y - hy;
+      const ddx  = b.x - head.x;
+      const ddy  = b.y - head.y;
       const dist = Math.sqrt(ddx * ddx + ddy * ddy);
       if (dist < b.radius + CELL_W * 0.5) {
-        // Push along collision normal (head→ball centre)
+        // Push along collision normal (head→ball centre) — clip the edge for cuts
         const cnx = dist > 0.001 ? ddx / dist : dir.dx;
         const cny = dist > 0.001 ? ddy / dist : dir.dy;
         b.vx += cnx * POWERS[settings.power];
         b.vy += cny * POWERS[settings.power];
-        b.hitCooldown    = HIT_COOLDOWN;
-        b.wallBounces    = 0;
-        b.chainHot       = false;
-        b.hasMoved       = true;
+        b.hitCooldown = HIT_COOLDOWN;
+        b.wallBounces = 0;
+        b.chainHot    = false;
       }
     }
   }
 
   function queueDir(dx, dy) {
-    if (dx === -dir.dx && dy === -dir.dy) return;
-    nextDir = { dx, dy };
+    if (turnQueue.length >= 3) return;
+    const last = turnQueue.length ? turnQueue[turnQueue.length - 1] : dir;
+    if (dx === -last.dx && dy === -last.dy) return;  // no 180° reversal
+    if (dx ===  last.dx && dy ===  last.dy) return;  // no-op
+    turnQueue.push({ dx, dy });
   }
 
   // Called when all balls in a round are potted
@@ -538,6 +612,7 @@
     drawTable();
     if (gameState !== 'start') {
       drawGrid();
+      if (gameState === 'playing') drawAimPreview();
       drawSnake();
       drawBalls();
     }
@@ -621,49 +696,84 @@
 
   // ── Grid ───────────────────────────────────────────────────────────────────
   function drawGrid() {
-    const gridW = GRID_COLS * CELL_W;
-    const gridH = GRID_ROWS * CELL_W;
-
-    ctx.strokeStyle = 'rgba(255,255,255,0.035)';
-    ctx.lineWidth = 0.5;
-    for (let c = 0; c <= GRID_COLS; c++) {
-      const x = INNER_LEFT + c * CELL_W;
-      ctx.beginPath();
-      ctx.moveTo(x, GRID_TOP);
-      ctx.lineTo(x, GRID_TOP + gridH);
-      ctx.stroke();
-    }
-    for (let r = 0; r <= GRID_ROWS; r++) {
-      const y = GRID_TOP + r * CELL_W;
-      ctx.beginPath();
-      ctx.moveTo(INNER_LEFT, y);
-      ctx.lineTo(INNER_LEFT + gridW, y);
-      ctx.stroke();
-    }
-
-    // Visible boundary showing the snake's playfield
+    // Visible boundary showing the snake's playfield (movement is continuous now)
     ctx.strokeStyle = 'rgba(0,255,65,0.28)';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 6]);
-    ctx.strokeRect(INNER_LEFT, GRID_TOP, gridW, gridH);
+    ctx.strokeRect(PLAY_L, PLAY_T, PLAY_R - PLAY_L, PLAY_B - PLAY_T);
     ctx.setLineDash([]);
   }
 
   // ── Snake ──────────────────────────────────────────────────────────────────
   function drawSnake() {
-    const len = snake.length;
-    for (let i = len - 1; i >= 0; i--) {
-      const { x: px, y: py } = cellToPixel(snake[i].x, snake[i].y);
-      const pad   = CELL_W * 0.12;
-      const sz    = CELL_W - pad * 2;
-      const alpha = i === 0 ? 1 : Math.max(0.25, 1 - (i / len) * 0.78);
+    if (!trail || trail.length === 0) return;
+    const sz = CELL_W * 0.76;
+    for (let i = snakeLen - 1; i >= 0; i--) {
+      const p     = trailPointAt(i * SEG_SPACING);
+      const alpha = i === 0 ? 1 : Math.max(0.25, 1 - (i / snakeLen) * 0.78);
       ctx.globalAlpha = alpha;
       if (i === 0) { ctx.shadowColor = '#00ff41'; ctx.shadowBlur = 14; }
       ctx.fillStyle = '#00ff41';
-      rrFill(px - sz / 2, py - sz / 2, sz, sz, sz * 0.28);
+      rrFill(p.x - sz / 2, p.y - sz / 2, sz, sz, sz * 0.28);
       ctx.shadowBlur = 0;
     }
     ctx.globalAlpha = 1;
+  }
+
+  // ── Aim preview: projected path of the first ball on the head's current line ──
+  function drawAimPreview() {
+    if (!trail || trail.length === 0) return;
+    const head  = trail[0];
+    const headR = CELL_W * 0.5;
+
+    let best = null;
+    for (const b of balls) {
+      if (b.potted || b.hitCooldown > 0) continue;
+      const rx = b.x - head.x;
+      const ry = b.y - head.y;
+      const t  = rx * dir.dx + ry * dir.dy;          // distance along heading
+      if (t < 0 || t > CELL_W * 16) continue;
+      const perp = rx * dir.dy - ry * dir.dx;        // lateral offset from the line
+      const R    = b.radius + headR * 0.95;
+      if (Math.abs(perp) >= R) continue;
+      const tHit = t - Math.sqrt(R * R - perp * perp);
+      if (tHit < 0) continue;
+      if (!best || tHit < best.tHit) best = { b, tHit };
+    }
+    if (!best) return;
+
+    const cx = head.x + dir.dx * best.tHit;          // head centre at contact
+    const cy = head.y + dir.dy * best.tHit;
+    let nx = best.b.x - cx;
+    let ny = best.b.y - cy;
+    const nl = Math.hypot(nx, ny) || 1;
+    nx /= nl; ny /= nl;
+
+    // Faint approach line head → contact point
+    ctx.setLineDash([3, 5]);
+    ctx.strokeStyle = 'rgba(0,255,65,0.30)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(head.x, head.y);
+    ctx.lineTo(cx, cy);
+    ctx.stroke();
+
+    // Projected ball path, extended to the cushion
+    let tw = Infinity;
+    if (nx > 0) tw = Math.min(tw, (TABLE_X + TABLE_W - best.b.x) / nx);
+    if (nx < 0) tw = Math.min(tw, (TABLE_X - best.b.x) / nx);
+    if (ny > 0) tw = Math.min(tw, (TABLE_Y + TABLE_H - best.b.y) / ny);
+    if (ny < 0) tw = Math.min(tw, (TABLE_Y - best.b.y) / ny);
+    if (!isFinite(tw)) tw = CELL_W * 6;
+
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(best.b.x + nx * best.b.radius, best.b.y + ny * best.b.radius);
+    ctx.lineTo(best.b.x + nx * tw,            best.b.y + ny * tw);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   // ── Balls ──────────────────────────────────────────────────────────────────
@@ -1012,10 +1122,7 @@
 
     if (gameState === 'playing') {
       physicsStep(dt);
-      if (ts - lastStepTime >= SPEEDS[settings.speed]) {
-        lastStepTime = ts;
-        snakeStep();
-      }
+      snakeUpdate(dt);
       // Last-ball countdown ran out — round ends anyway, no clear bonus
       if (lastBallDeadline > 0 && performance.now() > lastBallDeadline) {
         showMsg("TIME'S UP!");
@@ -1080,14 +1187,6 @@
       btn.addEventListener('click', () => {
         settings.friction = btn.dataset.value;
         document.querySelectorAll('[data-setting="friction"]').forEach(b =>
-          b.classList.toggle('setting-btn--active', b === btn));
-      });
-    });
-
-    document.querySelectorAll('[data-setting="snapToGrid"]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        settings.snapToGrid = btn.dataset.value === 'on';
-        document.querySelectorAll('[data-setting="snapToGrid"]').forEach(b =>
           b.classList.toggle('setting-btn--active', b === btn));
       });
     });
@@ -1216,7 +1315,11 @@
 
     balls            = [];
     pottedBalls      = [];
-    snake            = [];
+    trail            = [];
+    snakeLen         = 0;
+    turnQueue        = [];
+    dir              = { dx: 1, dy: 0 };
+    distSinceTurn    = 1e9;
     score            = 0;
     totalScore       = 0;
     elapsed          = 0;
